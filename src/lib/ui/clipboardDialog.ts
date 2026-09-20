@@ -1,4 +1,5 @@
 import Clutter from 'gi://Clutter';
+import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import Gio from 'gi://Gio';
 import Graphene from 'gi://Graphene';
@@ -18,12 +19,14 @@ import { ItemType } from '../common/constants.js';
 import { registerClass } from '../common/gjs.js';
 import { Icon, loadIcon } from '../common/icons.js';
 import { OpenClipboardDialogBehavior } from '../common/settings.js';
+import { beginTiming } from '../common/timing.js';
 import { ClipboardEntry } from '../database/database.js';
 import { VERSION } from '../misc/compatibility.js';
 import { ClipboardScrollView } from './clipboardScrollView.js';
 import { ClipboardItemMenu } from './components/clipboardItemMenu.js';
 import { ConfirmClearHistoryDialog } from './indicator.js';
 import { CharacterItem } from './items/characterItem.js';
+import type { ClipboardItem } from './items/clipboardItem.js';
 import { CodeItem } from './items/codeItem.js';
 import { ColorItem } from './items/colorItem.js';
 import { FileItem } from './items/fileItem.js';
@@ -32,9 +35,16 @@ import { ImageItem } from './items/imageItem.js';
 import { LinkItem } from './items/linkItem.js';
 import { TextItem } from './items/textItem.js';
 import { CenterBox, CollapsibleHeaderLayout, FitConstraint } from './layout.js';
-import { SearchEntry, SearchQuery } from './searchEntry.js';
+import { SearchChange, SearchEntry, SearchQuery } from './searchEntry.js';
 
-const ANIMATION_TIME = 150;
+const ANIMATION_TIME = 35;
+const HOT_WINDOW_ITEMS = 8;
+const PAGE_ITEMS = 8;
+
+function compareEntries(a: ClipboardEntry, b: ClipboardEntry): number {
+	const datetime = b.datetime.compare(a.datetime);
+	return datetime !== 0 ? datetime : b.id - a.id;
+}
 
 @registerClass()
 class IncognitoButton extends St.Button {
@@ -259,6 +269,19 @@ export class ClipboardDialog extends St.Widget {
 	private _updateCursor: boolean = true;
 	private _nextCursor: [number, number] | null = null;
 	private _cursor: [number, number] | null = null;
+	private _entries: ClipboardEntry[] = [];
+	private _filteredEntries: ClipboardEntry[] = [];
+	private _isTracked: ((entry: ClipboardEntry) => boolean) | null = null;
+	private _query: SearchQuery | null = null;
+	private _renderedCount = HOT_WINDOW_ITEMS;
+	private _modelRefreshId = 0;
+	private _afterOpenIdleId = 0;
+	private _previewIdleId = 0;
+	private readonly _previewQueue: ClipboardItem[] = [];
+	private readonly _queuedPreviews = new Set<ClipboardItem>();
+	private readonly _detachedWarmItems = new Map<ClipboardEntry, ClipboardItem>();
+	private _openToMapTiming: ReturnType<typeof beginTiming> | undefined;
+	private _openToIdleTiming: ReturnType<typeof beginTiming> | undefined;
 
 	private _orientation: Clutter.Orientation = Clutter.Orientation.HORIZONTAL;
 
@@ -312,7 +335,7 @@ export class ClipboardDialog extends St.Widget {
 
 		this._header.connect('open-settings', this.openSettings.bind(this));
 		this._header.connect('clear-history', this.confirmClearHistory.bind(this));
-		this._header.searchEntry.connect('search', (_, query: SearchQuery) => this._scrollView.search(query));
+		this._header.searchEntry.connect('search', (_, query: SearchQuery) => this.search(query));
 		this._header.searchEntry.connect('activate', () => this._scrollView.activateFirst());
 
 		this._header.connect('notify::header-visible', () => {
@@ -325,6 +348,7 @@ export class ClipboardDialog extends St.Widget {
 
 		// Scrollbox
 		this._scrollView = new ClipboardScrollView(ext);
+		this._scrollView.setLoadMoreCallback(this.renderMore.bind(this));
 		this._dialog.add_child(this._scrollView);
 
 		this._widthConstraint = new Clutter.BindConstraint({
@@ -394,10 +418,14 @@ export class ClipboardDialog extends St.Widget {
 		this.updateMargins();
 
 		// Update initial search for when exclude-pinned or exclude-tagged is enabled
-		this._scrollView.search(this._header.searchEntry.searchQuery);
+		this._query = this._header.searchEntry.searchQuery.withChange(SearchChange.Different);
 	}
 
 	override destroy() {
+		this.cancelScheduledWork();
+		this.disconnectEntries();
+		this.clearDetachedWarmItems();
+		this.cancelOpenTimings('destroyed');
 		(Main.inputMethod as Clutter.InputMethod).disconnectObject(this);
 		this._ibusManager.disconnectObject(this);
 		this.ext.settings.disconnectObject(this);
@@ -421,6 +449,7 @@ export class ClipboardDialog extends St.Widget {
 
 	public open() {
 		if (this.opened || this._closing) return;
+		this.beginOpenTimings('direct');
 
 		this._updateCursor = false;
 		this._nextCursor = this._cursor;
@@ -432,6 +461,7 @@ export class ClipboardDialog extends St.Widget {
 				? (grab as Clutter.Grab & { is_revoked(): boolean }).is_revoked()
 				: (grab as Clutter.Grab & { get_seat_state(): number }).get_seat_state() !== Clutter.GrabState.ALL;
 		if (grabFailed) {
+			this.cancelOpenTimings('grab-failed');
 			Main.popModal(grab);
 			return;
 		}
@@ -471,6 +501,7 @@ export class ClipboardDialog extends St.Widget {
 
 		this.opened = true;
 		global.compositor.disable_unredirect();
+		this.scheduleAfterOpen();
 
 		this._dialog.ease({
 			opacity: 255,
@@ -485,6 +516,7 @@ export class ClipboardDialog extends St.Widget {
 
 	public close() {
 		if (!this.opened) return;
+		this.cancelOpenTimings('closed');
 
 		this._closing = true;
 		this.opened = false;
@@ -530,12 +562,258 @@ export class ClipboardDialog extends St.Widget {
 				this._grab = null;
 				this._closing = false;
 				this.hide();
+				this._renderedCount = HOT_WINDOW_ITEMS;
+				this.refreshWindow(false);
 				global.compositor.enable_unredirect();
 			},
 		});
 	}
 
 	public addEntry(entry: ClipboardEntry): void {
+		if (this._entries.includes(entry)) return;
+
+		this._entries.push(entry);
+		this._entries.sort(compareEntries);
+		this.connectEntry(entry);
+		this.refreshWindow(true, 'live');
+
+		if (!this._scrollView.getItems().some((item) => item.entry === entry)) {
+			const item = this.createItem(entry);
+			if (item) {
+				this._detachedWarmItems.set(entry, item);
+				this.trimDetachedWarmItems();
+				this.queuePreviews([item]);
+			}
+		}
+	}
+
+	public loadEntries(entries: ClipboardEntry[], isTracked: (entry: ClipboardEntry) => boolean): void {
+		this.cancelModelRefresh();
+		this.disconnectEntries();
+		this.clearDetachedWarmItems();
+		this._isTracked = isTracked;
+		this._entries = entries.filter(isTracked).sort(compareEntries);
+		for (const entry of this._entries) this.connectEntry(entry);
+
+		this._renderedCount = HOT_WINDOW_ITEMS;
+		this._scrollView.setLoading(false);
+		this.refreshWindow(this.opened, 'initial');
+	}
+
+	public setLoading(loading: boolean): void {
+		this._scrollView.setLoading(loading);
+	}
+
+	private cancelScheduledWork(): void {
+		this.cancelModelRefresh();
+		if (this._afterOpenIdleId !== 0) GLib.source_remove(this._afterOpenIdleId);
+		if (this._previewIdleId !== 0) GLib.source_remove(this._previewIdleId);
+		this._afterOpenIdleId = 0;
+		this._previewIdleId = 0;
+		this._previewQueue.length = 0;
+		this._queuedPreviews.clear();
+	}
+
+	private clearDetachedWarmItems(): void {
+		for (const item of this._detachedWarmItems.values()) item.destroy();
+		this._detachedWarmItems.clear();
+	}
+
+	private trimDetachedWarmItems(): void {
+		while (this._detachedWarmItems.size > HOT_WINDOW_ITEMS) {
+			const entry = this._detachedWarmItems.keys().next().value;
+			if (!entry) return;
+			this._detachedWarmItems.get(entry)?.destroy();
+			this._detachedWarmItems.delete(entry);
+		}
+	}
+
+	private connectEntry(entry: ClipboardEntry): void {
+		entry.connectObject(
+			'notify::datetime',
+			() => this.entryChanged(entry, true),
+			'delete',
+			() => this.entryDeleted(entry),
+			'notify::content',
+			() => this.scheduleModelRefresh(),
+			'notify::pinned',
+			() => this.scheduleModelRefresh(),
+			'notify::tag',
+			() => this.scheduleModelRefresh(),
+			'notify::type',
+			() => this.scheduleModelRefresh(),
+			'notify::metadata',
+			() => this.scheduleModelRefresh(),
+			'notify::title',
+			() => this.scheduleModelRefresh(),
+			this,
+		);
+	}
+
+	private disconnectEntries(): void {
+		for (const entry of this._entries) entry.disconnectObject(this);
+		this._entries = [];
+		this._filteredEntries = [];
+	}
+
+	private entryChanged(entry: ClipboardEntry, warmPreview: boolean): void {
+		if (!this._entries.includes(entry)) return;
+		this._entries.sort(compareEntries);
+		this.refreshWindow(warmPreview, 'reorder');
+		if (
+			warmPreview &&
+			!this._detachedWarmItems.has(entry) &&
+			!this._scrollView.getItems().some((item) => item.entry === entry)
+		) {
+			const item = this.createItem(entry);
+			if (item) {
+				this._detachedWarmItems.set(entry, item);
+				this.trimDetachedWarmItems();
+				this.queuePreviews([item]);
+			}
+		}
+	}
+
+	private entryDeleted(entry: ClipboardEntry): void {
+		const index = this._entries.indexOf(entry);
+		if (index < 0) return;
+
+		entry.disconnectObject(this);
+		this._entries.splice(index, 1);
+		this._detachedWarmItems.get(entry)?.destroy();
+		this._detachedWarmItems.delete(entry);
+		this.refreshWindow(this.opened, 'delete');
+	}
+
+	private search(query: SearchQuery): void {
+		this._query = query.withChange(SearchChange.Different);
+		this._renderedCount = HOT_WINDOW_ITEMS;
+		this.scheduleModelRefresh();
+	}
+
+	private scheduleModelRefresh(): void {
+		if (this._modelRefreshId !== 0) return;
+		this._modelRefreshId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+			this._modelRefreshId = 0;
+			this.refreshWindow(this.opened, 'model-change');
+			return GLib.SOURCE_REMOVE;
+		});
+	}
+
+	private cancelModelRefresh(): void {
+		if (this._modelRefreshId !== 0) GLib.source_remove(this._modelRefreshId);
+		this._modelRefreshId = 0;
+	}
+
+	private matchesQuery(entry: ClipboardEntry): boolean {
+		const query = this._query;
+		if (!query) return true;
+
+		const text = [entry.content];
+		if (entry.type === ItemType.File || entry.type === ItemType.Files) {
+			try {
+				text.push(decodeURI(entry.content).replaceAll('file://', ''));
+			} catch {
+				// Keep the original URI when it is not valid percent-encoded text.
+			}
+		}
+
+		if (entry.metadata) text.push(JSON.stringify(entry.metadata));
+		return query.matchesEntry(false, entry, ...text);
+	}
+
+	private refreshWindow(warmNewPreviews: boolean, phase: string = 'refresh'): void {
+		const timing = beginTiming((message) => this.ext.logger?.log(message), 'ui.visible-actors', { phase });
+		this._filteredEntries = this._entries.filter(
+			(entry) => (this._isTracked?.(entry) ?? true) && this.matchesQuery(entry),
+		);
+
+		const targetEntries = this._filteredEntries.slice(0, this._renderedCount);
+		const existing = new Map(this._detachedWarmItems);
+		for (const item of this._scrollView.getItems()) existing.set(item.entry, item);
+		const created: ClipboardItem[] = [];
+		const items: ClipboardItem[] = [];
+		for (const entry of targetEntries) {
+			let item = existing.get(entry);
+			if (!item) {
+				const createdItem = this.createItem(entry);
+				if (createdItem) {
+					item = createdItem;
+					created.push(createdItem);
+				}
+			}
+			if (item) {
+				this._detachedWarmItems.delete(entry);
+				items.push(item);
+			}
+		}
+
+		this._scrollView.syncItems(items);
+		if (warmNewPreviews) this.queuePreviews(created);
+		timing.finish({ created: created.length, retained: items.length - created.length, total: items.length });
+	}
+
+	private renderMore(): void {
+		if (!this.opened || this._renderedCount >= this._filteredEntries.length) return;
+
+		this._renderedCount = Math.min(this._renderedCount + PAGE_ITEMS, this._filteredEntries.length);
+		this.refreshWindow(true, 'page');
+	}
+
+	private scheduleAfterOpen(): void {
+		if (this._afterOpenIdleId !== 0) return;
+
+		this._afterOpenIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+			this._afterOpenIdleId = 0;
+			this._openToIdleTiming?.finish({ phase: 'post-map' });
+			this._openToIdleTiming = undefined;
+			this.queuePreviews(this._scrollView.getItems());
+			return GLib.SOURCE_REMOVE;
+		});
+	}
+
+	private queuePreviews(items: readonly ClipboardItem[]): void {
+		for (const item of items) {
+			if (this._queuedPreviews.has(item)) continue;
+			this._queuedPreviews.add(item);
+			this._previewQueue.push(item);
+		}
+
+		if (this._previewIdleId !== 0 || this._previewQueue.length === 0) return;
+		this._previewIdleId = GLib.idle_add(GLib.PRIORITY_LOW, () => {
+			const item = this._previewQueue.shift();
+			if (!item) {
+				this._previewIdleId = 0;
+				return GLib.SOURCE_REMOVE;
+			}
+
+			this._queuedPreviews.delete(item);
+			if (item.get_parent() !== null || this._detachedWarmItems.get(item.entry) === item) item.loadPreview();
+			if (this._previewQueue.length > 0) return GLib.SOURCE_CONTINUE;
+
+			this._previewIdleId = 0;
+			return GLib.SOURCE_REMOVE;
+		});
+	}
+
+	private beginOpenTimings(source: 'shortcut' | 'direct'): void {
+		if (this._openToMapTiming || this._openToIdleTiming) return;
+
+		const label = source === 'shortcut' ? 'ui.shortcut-to-map' : 'ui.open-to-map';
+		this._openToMapTiming = beginTiming((message) => this.ext.logger?.log(message), label, { source });
+		this._openToIdleTiming = beginTiming((message) => this.ext.logger?.log(message), 'ui.open-to-first-idle', {
+			source,
+		});
+	}
+
+	private cancelOpenTimings(reason: string): void {
+		this._openToMapTiming?.cancel({ reason });
+		this._openToIdleTiming?.cancel({ reason });
+		this._openToMapTiming = undefined;
+		this._openToIdleTiming = undefined;
+	}
+
+	private createItem(entry: ClipboardEntry): ClipboardItem | null {
 		let item;
 		try {
 			item = (() => {
@@ -563,11 +841,11 @@ export class ClipboardDialog extends St.Widget {
 
 			if (!item) {
 				this.ext.logger.error('Unknown item type', entry);
-				return;
+				return null;
 			}
 		} catch (e) {
 			this.ext.logger.error(e);
-			return;
+			return null;
 		}
 
 		// Connect edit
@@ -624,20 +902,28 @@ export class ClipboardDialog extends St.Widget {
 			this,
 		);
 
-		this._scrollView.addItem(item);
+		return item;
 	}
 
 	public dialogShortcut() {
 		const behavior = this.ext.settings.get_enum('open-clipboard-dialog-behavior');
 		if (behavior === OpenClipboardDialogBehavior.Toggle) {
+			if (!this.opened) this.beginOpenTimings('shortcut');
 			this.toggle();
 		} else if (behavior === OpenClipboardDialogBehavior.OpenOrSelectNext) {
-			if (!this.opened) this.open();
-			else this._scrollView.selectNextItem();
+			if (!this.opened) {
+				this.beginOpenTimings('shortcut');
+				this.open();
+			} else this._scrollView.selectNextItem();
 		}
 	}
 
 	public clearEntries() {
+		this.cancelModelRefresh();
+		this.disconnectEntries();
+		this.clearDetachedWarmItems();
+		this._isTracked = null;
+		this._renderedCount = HOT_WINDOW_ITEMS;
 		this._scrollView.clearItems();
 	}
 
@@ -833,6 +1119,8 @@ export class ClipboardDialog extends St.Widget {
 
 	override vfunc_map(): void {
 		super.vfunc_map();
+		this._openToMapTiming?.finish();
+		this._openToMapTiming = undefined;
 
 		// Update fit constraint
 		this.updateFitConstraint();

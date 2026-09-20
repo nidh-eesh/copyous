@@ -139,6 +139,14 @@ export class ClipboardItem extends St.Button {
 		this.visible = query.matchesEntry(this.visible, this.entry, this.entry.content);
 	}
 
+	/**
+	 * Start work that is only useful once this card is in (or near) the
+	 * viewport.  Lightweight item types keep the default no-op; file-backed
+	 * items override this to defer filesystem/network work until the scroll
+	 * container asks for it.
+	 */
+	public loadPreview(): void {}
+
 	private updateSize() {
 		const width = this.ext.settings.get_int('item-width');
 		const height = this.ext.settings.get_int('item-height');
@@ -300,6 +308,7 @@ export class ClipboardItem extends St.Button {
 	}
 
 	override destroy() {
+		this.entry.disconnectObject(this);
 		this.ext.settings.disconnectObject(this);
 
 		super.destroy();

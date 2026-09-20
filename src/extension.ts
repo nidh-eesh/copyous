@@ -10,6 +10,7 @@ import { getDataPath, getHljsLanguages, getHljsPath } from './lib/common/constan
 import { DbusService } from './lib/common/dbus.js';
 import { ClipboardHistory, CopyousSettings, migrateSettings } from './lib/common/settings.js';
 import { SoundManager, tryCreateSoundManager } from './lib/common/sound.js';
+import { beginTiming, timingEvent } from './lib/common/timing.js';
 import { ClipboardEntry } from './lib/database/database.js';
 import { ClipboardEntryTracker } from './lib/database/entryTracker.js';
 import { ClipboardManager } from './lib/misc/clipboard.js';
@@ -41,6 +42,7 @@ export default class CopyousExtension extends Extension {
 	public shortcutsManager: ShortcutManager | undefined;
 
 	private entryTracker: ClipboardEntryTracker | undefined;
+	private entryTrackerInitSerial: number = 0;
 	private historyTimeoutId: number = -1;
 	private updateHistory: boolean = false;
 
@@ -52,6 +54,7 @@ export default class CopyousExtension extends Extension {
 
 		this.logger = this.getLogger();
 		const error = this.logger.error.bind(this.logger);
+		timingEvent((message) => this.logger?.log(message), 'extension.enable');
 
 		// Highlight.js
 		this.initHljs().catch(error);
@@ -127,6 +130,7 @@ export default class CopyousExtension extends Extension {
 
 		// Database
 		this.entryTracker = new ClipboardEntryTracker(this);
+		this.clipboardDialog.setLoading(true);
 		this.initEntryTracker().catch(error);
 		this.initHistoryTimeout().catch(error);
 
@@ -252,20 +256,34 @@ export default class CopyousExtension extends Extension {
 		);
 	}
 
-	public connectHljsInit(fn: () => void) {
-		if (this.hljs != null) return;
+	public connectHljsInit(fn: () => void): () => void {
+		if (this.hljs != null) return () => {};
 
 		this.hljsCallbacks ??= [];
 		this.hljsCallbacks.push(fn);
+		return () => {
+			this.hljsCallbacks = this.hljsCallbacks?.filter((callback) => callback !== fn);
+		};
 	}
 
 	private async initEntryTracker() {
 		if (!this.entryTracker || !this.entryTracker.shouldInit) return;
+		const serial = ++this.entryTrackerInitSerial;
+		const hydration = beginTiming((message) => this.logger?.log(message), 'storage.hydration', {
+			serial,
+		});
 
+		this.clipboardDialog?.setLoading(true);
 		this.clipboardDialog?.clearEntries();
-		const entries = await this.entryTracker.init();
-		for (const entry of entries) {
-			this.clipboardDialog?.addEntry(entry);
+		try {
+			const entries = await this.entryTracker.init();
+			hydration.finish({ entries: entries.length, stale: serial !== this.entryTrackerInitSerial });
+			if (serial !== this.entryTrackerInitSerial || !this.entryTracker || !this.clipboardDialog) return;
+			this.clipboardDialog.loadEntries(entries, (entry) => this.entryTracker?.isTracked(entry) ?? false);
+		} catch (error) {
+			hydration.cancel({ error: true });
+			if (serial === this.entryTrackerInitSerial) this.clipboardDialog?.setLoading(false);
+			throw error;
 		}
 	}
 
@@ -290,6 +308,9 @@ export default class CopyousExtension extends Extension {
 	}
 
 	override disable() {
+		timingEvent((message) => this.logger?.log(message), 'extension.disable');
+		this.entryTrackerInitSerial++;
+
 		// UI
 		this.clipboardDialog?.disconnectObject(this);
 		this.clipboardDialog?.destroy();

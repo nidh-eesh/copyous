@@ -12,6 +12,7 @@ import { ActiveState } from '../../common/constants.js';
 import { enumParamSpec, flagsParamSpec, registerClass } from '../../common/gjs.js';
 import { Icon, loadIcon } from '../../common/icons.js';
 import { BackgroundSize, FilePreviewType } from '../../common/settings.js';
+import { beginTiming } from '../../common/timing.js';
 import { CodeLabel, CodeLabelConstructorProps } from './codeLabel.js';
 
 export const FileType = {
@@ -50,17 +51,39 @@ export class ContentPreview extends St.BoxLayout {
 })
 export class ImagePreview extends ContentPreview {
 	private _backgroundSize: BackgroundSize = BackgroundSize.Cover;
-	private readonly _ratio: number | null;
-	private readonly _effect?: Clutter.BrightnessContrastEffect;
+	private _ratio: number | null = null;
+	private _effect: Clutter.BrightnessContrastEffect | null = null;
+	private _imageBox: St.Widget | null = null;
+	private _loaded = false;
+	private _active: ActiveState = ActiveState.None;
 
-	constructor(ext: Extension, image: Gio.File) {
+	constructor(
+		private readonly ext: Extension,
+		private readonly image: Gio.File,
+		load = true,
+	) {
 		super();
 
 		this.add_style_class_name('image-preview');
+		this.backgroundSize = this._backgroundSize;
+		if (load) this.load();
+	}
 
-		if (image.query_exists(null)) {
+	/**
+	 * Load the image data after the card has been made visible.  Constructing an
+	 * ImagePreview is intentionally cheap; image probing and texture creation
+	 * can otherwise block the first frame while the dialog is opening.
+	 */
+	public load(): void {
+		if (this._loaded) return;
+		this._loaded = true;
+
+		if (this.image.query_exists(null)) {
 			try {
-				const [, width, height] = GdkPixbuf.Pixbuf.get_file_info(image.get_path()!);
+				const path = this.image.get_path();
+				if (!path) throw new Error('Image has no local path');
+				const [format, width, height] = GdkPixbuf.Pixbuf.get_file_info(path);
+				if (!format || width <= 0 || height <= 0) throw new Error('File is not a supported image');
 				this._ratio = height / width;
 
 				const imageBox = new St.Widget({
@@ -69,12 +92,14 @@ export class ImagePreview extends ContentPreview {
 					y_align: Clutter.ActorAlign.FILL,
 					x_expand: true,
 					y_expand: true,
-					style: `background-image: url("${image.get_uri()}");`,
+					style: `background-image: url("${this.image.get_uri()}");`,
 				});
 				this.add_child(imageBox);
+				this._imageBox = imageBox;
 
 				this._effect = new Clutter.BrightnessContrastEffect();
 				imageBox.add_effect(this._effect);
+				this.applyActive();
 				return;
 			} catch {
 				// Ignore
@@ -85,7 +110,7 @@ export class ImagePreview extends ContentPreview {
 		this.add_style_class_name('missing-image');
 		this.add_child(
 			new St.Icon({
-				gicon: loadIcon(ext, Icon.MissingImage),
+				gicon: loadIcon(this.ext, Icon.MissingImage),
 				x_align: Clutter.ActorAlign.CENTER,
 				y_align: Clutter.ActorAlign.CENTER,
 				x_expand: true,
@@ -93,6 +118,7 @@ export class ImagePreview extends ContentPreview {
 				min_height: 0,
 			}),
 		);
+		this.queue_relayout();
 	}
 
 	get backgroundSize() {
@@ -108,16 +134,22 @@ export class ImagePreview extends ContentPreview {
 		} else {
 			this.add_style_class_name('contain');
 		}
+		this._imageBox?.queue_relayout();
 	}
 
 	set active(active: ActiveState) {
+		this._active = active;
+		this.applyActive();
+	}
+
+	private applyActive(): void {
 		if (!this._effect) return;
 
-		if ((active & ActiveState.Active) > 0) {
+		if ((this._active & ActiveState.Active) > 0) {
 			this._effect.set_brightness(0.2);
-		} else if ((active & ActiveState.FocusHover) === (ActiveState.FocusHover as number)) {
+		} else if ((this._active & ActiveState.FocusHover) === (ActiveState.FocusHover as number)) {
 			this._effect.set_brightness(0.1);
-		} else if (active & ActiveState.Focus || active & ActiveState.Hover) {
+		} else if (this._active & ActiveState.Focus || this._active & ActiveState.Hover) {
 			this._effect.set_brightness(0.05);
 		} else {
 			this._effect.enabled = false;
@@ -300,19 +332,34 @@ export async function tryCreateFilePreview(
 	thumbnail: Gio.File | null,
 ): Promise<ContentPreview | null> {
 	const allowedTypes = ext.settings.get_child('file-item').get_flags('file-preview-types');
+	const timing = beginTiming((message) => ext.logger?.log(message), 'ui.preview.file', {
+		type: fileType,
+	});
 
 	try {
-		if (!file.query_exists(null)) return null;
-
-		switch (fileType) {
-			case FileType.Text:
-				return allowedTypes & FilePreviewType.Text ? await createTextPreview(ext, file) : null;
-			case FileType.Image:
-				return allowedTypes & FilePreviewType.Image ? new ImagePreview(ext, file) : null;
+		if (!file.query_exists(null)) {
+			timing.finish({ created: false, reason: 'missing' });
+			return null;
 		}
 
-		return thumbnail && allowedTypes & FilePreviewType.Thumbnail ? new ThumbnailPreview(ext, file) : null;
+		let preview: ContentPreview | null;
+		switch (fileType) {
+			case FileType.Text:
+				preview = allowedTypes & FilePreviewType.Text ? await createTextPreview(ext, file) : null;
+				break;
+			case FileType.Image:
+				preview = allowedTypes & FilePreviewType.Image ? new ImagePreview(ext, file) : null;
+				break;
+			default:
+				preview =
+					thumbnail && allowedTypes & FilePreviewType.Thumbnail ? new ThumbnailPreview(ext, thumbnail) : null;
+				break;
+		}
+
+		timing.finish({ created: preview !== null });
+		return preview;
 	} catch (error) {
+		timing.cancel({ error: true });
 		ext.logger.error(error);
 		return null;
 	}

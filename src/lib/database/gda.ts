@@ -392,14 +392,17 @@ export class GdaDatabase implements Database {
 			return deleted;
 		} catch (e) {
 			this.ext.logger.error('Failed to clear clipboard', e);
+			throw e;
 		}
-
-		return [];
 	}
 
 	public close(): Promise<void> {
 		this._connection.close();
 		this._cancellable.cancel();
+		return Promise.resolve();
+	}
+
+	public flush(): Promise<void> {
 		return Promise.resolve();
 	}
 
@@ -551,14 +554,13 @@ export class GdaDatabase implements Database {
 				this._cancellable,
 			);
 			const id = row?.get_nth_holder(0).get_value() as unknown as number;
-			if (id == null) return null;
+			if (id == null) throw new Error('Database did not return an inserted row id');
 
 			return new ClipboardEntry(id, type, content, false, null, datetime, metadata);
 		} catch (e) {
 			this.ext.logger.error('Failed to insert entry', e);
+			throw e;
 		}
-
-		return null;
 	}
 
 	public async updateProperty<K extends Exclude<keyof ClipboardEntry, keyof GObject.Object | 'id'>>(
@@ -605,9 +607,8 @@ export class GdaDatabase implements Database {
 			return id ?? -1;
 		} catch (e) {
 			this.ext.logger.error(`Failed to update property "${property}" for entry ${entry.id}`, e);
+			throw e;
 		}
-
-		return -1;
 	}
 
 	public async delete(entry: ClipboardEntry): Promise<boolean> {
@@ -637,9 +638,8 @@ export class GdaDatabase implements Database {
 			return result > 0;
 		} catch (e) {
 			this.ext.logger.error(`Failed to delete entry ${entry.id}`, e);
+			throw e;
 		}
-
-		return false;
 	}
 
 	public async deleteOldest(offset: number, olderThanMinutes: number): Promise<number[]> {
@@ -707,9 +707,8 @@ export class GdaDatabase implements Database {
 			return deleted;
 		} catch (e) {
 			this.ext.logger.error('Failed to delete oldest entries', e);
+			throw e;
 		}
-
-		return [];
 	}
 
 	private selectToDeleteBuilder(

@@ -11,6 +11,7 @@ import { ActiveState } from '../../common/constants.js';
 import { enumParamSpec, flagsParamSpec, registerClass } from '../../common/gjs.js';
 import { Icon } from '../../common/icons.js';
 import { BackgroundSize, LinkItemSettings } from '../../common/settings.js';
+import { beginTiming } from '../../common/timing.js';
 import { ClipboardEntry, LinkMetadata } from '../../database/database.js';
 import { tryGetLinkImage, tryGetMetadata } from '../../misc/link.js';
 import { ImagePreview } from '../components/contentPreview.js';
@@ -149,9 +150,12 @@ export class LinkPreview extends St.Widget {
 			this._image.visible = this._showImage;
 		} else if (this._image === undefined && this._metadata?.image && this._showImage) {
 			this._image = null;
+			const timing = beginTiming((message) => this.ext.logger?.log(message), 'ui.preview.link-image');
 
 			tryGetLinkImage(this.ext, this._metadata.image, this._cancellable)
 				.then((image) => {
+					timing.finish({ found: image !== null });
+					if (this._cancellable.is_cancelled()) return;
 					if (image) {
 						this._image = new ImagePreview(this.ext, image);
 						this._image.backgroundSize = this._backgroundSize;
@@ -160,7 +164,7 @@ export class LinkPreview extends St.Widget {
 						this._image = null;
 					}
 				})
-				.catch(() => {});
+				.catch(() => timing.cancel({ error: true }));
 		}
 
 		this._title.visible = this._metadata?.title != null || this._metadata?.description != null;
@@ -298,8 +302,10 @@ export class LinkItem extends ClipboardItem {
 	private readonly _url: St.Label;
 
 	private readonly _cancellable: Gio.Cancellable = new Gio.Cancellable();
+	private _previewLoaded = false;
+	private _destroyed = false;
 
-	constructor(ext: CopyousExtension, entry: ClipboardEntry) {
+	constructor(ext: CopyousExtension, entry: ClipboardEntry, loadPreview = false) {
 		super(ext, entry, Icon.Link, _('Link'));
 
 		this.linkItemSettings = this.ext.settings.get_child('link-item');
@@ -315,12 +321,26 @@ export class LinkItem extends ClipboardItem {
 		this._content.add_child(this._url);
 
 		// Bind properties
-		this.linkItemSettings.connectObject('changed', this.updateLinkPreview.bind(this), this);
-		this.ext.settings.connectObject('changed::show-header', this.updateLinkPreview.bind(this), this);
+		this.linkItemSettings.connectObject(
+			'changed',
+			() => {
+				if (this._previewLoaded) this.updateLinkPreview().catch(() => {});
+			},
+			this,
+		);
+		this.ext.settings.connectObject(
+			'changed::show-header',
+			() => {
+				if (this._previewLoaded) this.updateLinkPreview().catch(() => {});
+			},
+			this,
+		);
 
 		this.bind_property('active', this._linkPreview, 'active', GObject.BindingFlags.DEFAULT);
 
-		this.updateLinkPreview().catch(() => {});
+		this._linkPreview.visible = false;
+		this._url.visible = true;
+		if (loadPreview) this.loadPreview();
 	}
 
 	public override search(query: SearchQuery): void {
@@ -332,6 +352,8 @@ export class LinkItem extends ClipboardItem {
 	}
 
 	private async updateLinkPreview() {
+		if (!this._previewLoaded || this._destroyed) return;
+
 		const patterns = this.linkItemSettings.get_strv('link-preview-exclusion-patterns');
 
 		let regex = null;
@@ -362,13 +384,29 @@ export class LinkItem extends ClipboardItem {
 			const metadata: LinkMetadata = { title: null, description: null, image: null, ...this.entry.metadata };
 			this._linkPreview.metadata ??= metadata;
 		} else if (show) {
-			const metadata = await tryGetMetadata(this.ext, url, this._cancellable);
-			this.entry.metadata = metadata;
-			this._linkPreview.metadata = metadata;
+			const timing = beginTiming((message) => this.ext.logger?.log(message), 'ui.preview.link-metadata');
+			try {
+				const metadata = await tryGetMetadata(this.ext, url, this._cancellable);
+				if (this._destroyed || this._cancellable.is_cancelled()) return;
+				timing.finish({ found: metadata !== null });
+				this.entry.metadata = metadata;
+				this._linkPreview.metadata = metadata;
+			} catch (error) {
+				timing.cancel({ error: true });
+				throw error;
+			}
 		}
 	}
 
+	override loadPreview(): void {
+		if (this._previewLoaded || this._destroyed) return;
+
+		this._previewLoaded = true;
+		this.updateLinkPreview().catch(() => {});
+	}
+
 	override destroy() {
+		this._destroyed = true;
 		this.linkItemSettings.disconnectObject(this);
 		this._cancellable.cancel();
 

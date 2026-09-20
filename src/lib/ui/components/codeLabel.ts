@@ -205,6 +205,7 @@ export interface CodeLabelConstructorProps {
 	syntaxHighlighting: boolean;
 	showLineNumbers: boolean;
 	tabWidth: number;
+	defer?: boolean;
 }
 
 /**
@@ -261,14 +262,19 @@ export class CodeLabel extends St.Label {
 	private _tabWidth = 4;
 	private _syntaxHighlighting = true;
 	private _showLineNumbers = true;
+	private _loaded = true;
+	private readonly _disconnectHljsInit: () => void;
 
 	private _highlighted: string = '';
+	private _lineMetrics: { layout: Pango.Layout; serial: number; offset: number; heights: number[] } | null = null;
 
 	public constructor(
 		private ext: CopyousExtension,
 		props: Partial<St.Label.ConstructorProps & CodeLabelConstructorProps>,
 	) {
-		super({ ...props, min_height: 0, clip_to_allocation: true });
+		const { defer = false, ...labelProps } = props;
+		super({ ...labelProps, min_height: 0, clip_to_allocation: true });
+		this._loaded = !defer;
 		this.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
 		this.clutter_text.ellipsize = Pango.EllipsizeMode.END;
 
@@ -291,12 +297,13 @@ export class CodeLabel extends St.Label {
 		}
 
 		// Update text after hljs is loaded
-		this.ext.connectHljsInit(this.updateText.bind(this));
+		this._disconnectHljsInit = this.ext.connectHljsInit(this.updateText.bind(this));
 
-		this.updateText();
+		if (this._loaded) this.updateText();
 	}
 
 	override destroy(): void {
+		this._disconnectHljsInit();
 		if (this._colorSchemeChangedId >= 0) {
 			this.ext.themeManager?.disconnect(this._colorSchemeChangedId);
 		}
@@ -308,10 +315,17 @@ export class CodeLabel extends St.Label {
 		return this._code;
 	}
 
+	/** Start syntax highlighting after the owning card enters the viewport. */
+	public load(): void {
+		if (this._loaded) return;
+		this._loaded = true;
+		this.updateText();
+	}
+
 	set code(code: string) {
 		if (this._code === code) return;
 		this._code = code;
-		this.updateText();
+		if (this._loaded) this.updateText();
 		this.notify('code');
 	}
 
@@ -322,7 +336,7 @@ export class CodeLabel extends St.Label {
 	set language(language: Language | null) {
 		if (this._language === language) return;
 		this._language = language;
-		this.updateText();
+		if (this._loaded) this.updateText();
 		this.notify('language');
 	}
 
@@ -333,7 +347,7 @@ export class CodeLabel extends St.Label {
 	set syntaxHighlighting(syntaxHighlighting: boolean) {
 		if (this._syntaxHighlighting === syntaxHighlighting) return;
 		this._syntaxHighlighting = syntaxHighlighting;
-		this.updateText();
+		if (this._loaded) this.updateText();
 		this.notify('syntax-highlighting');
 	}
 
@@ -344,7 +358,7 @@ export class CodeLabel extends St.Label {
 	set showLineNumbers(showLineNumbers: boolean) {
 		if (this._showLineNumbers === showLineNumbers) return;
 		this._showLineNumbers = showLineNumbers;
-		this.updateLabel();
+		if (this._loaded) this.updateLabel();
 		this.notify('show-line-numbers');
 	}
 
@@ -355,7 +369,7 @@ export class CodeLabel extends St.Label {
 	set tabWidth(tabWidth: number) {
 		if (this._tabWidth === tabWidth) return;
 		this._tabWidth = tabWidth;
-		this.updateText();
+		if (this._loaded) this.updateText();
 		this.notify('tab-width');
 	}
 
@@ -388,6 +402,7 @@ export class CodeLabel extends St.Label {
 	}
 
 	private updateLabel() {
+		this._lineMetrics = null;
 		let text = this._highlighted;
 		const lines = this._highlighted.split('\n');
 		this.clutter_text.line_wrap = lines.length === 1;
@@ -411,17 +426,26 @@ export class CodeLabel extends St.Label {
 		const contentBox = themeNode.get_content_box(box);
 		const scale = this.get_resource_scale();
 
-		// Shift one line up to account for extra blank line
 		const layout = this.clutter_text.get_layout();
-		const line = layout.get_line_readonly(0);
-		const offset = line ? line.get_height() / Pango.SCALE / scale : 0;
-		contentBox.y1 -= offset;
+		const serial = layout.get_serial();
+		if (this._lineMetrics?.layout !== layout || this._lineMetrics.serial !== serial) {
+			const line = layout.get_line_readonly(0);
+			const offset = line ? line.get_height() / Pango.SCALE : 0;
+			this._lineMetrics = { layout, serial, offset, heights: [] };
+		}
+
+		const { offset, heights } = this._lineMetrics;
+		contentBox.y1 -= offset / scale;
 
 		// Fit label to content box without partial clipping
 		let y = contentBox.y1;
-		for (const l of layout.get_lines_readonly()) {
-			const [, extents] = l.get_extents();
-			const height = (extents?.height ?? 0) / Pango.SCALE / scale;
+		const lineCount = layout.get_line_count();
+		for (let i = 0; i < lineCount; i++) {
+			if (heights[i] === undefined) {
+				const [, extents] = layout.get_line_readonly(i)!.get_extents();
+				heights[i] = (extents?.height ?? 0) / Pango.SCALE;
+			}
+			const height = heights[i]! / scale;
 			if (y + height <= contentBox.y2) {
 				y += height;
 			} else {
@@ -431,5 +455,10 @@ export class CodeLabel extends St.Label {
 		}
 
 		this.clutter_text.allocate(contentBox);
+	}
+
+	override vfunc_style_changed(): void {
+		super.vfunc_style_changed();
+		this._lineMetrics = null;
 	}
 }

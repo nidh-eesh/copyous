@@ -18,8 +18,9 @@ export class CodeItem extends ClipboardItem {
 
 	private readonly _code: CodeLabel;
 	private _codeInfo?: CodeInfo;
+	private _previewLoaded = false;
 
-	constructor(ext: CopyousExtension, entry: ClipboardEntry) {
+	constructor(ext: CopyousExtension, entry: ClipboardEntry, loadPreview = false) {
 		super(ext, entry, Icon.Code, _('Code'));
 
 		this.codeItemSettings = this.ext.settings.get_child('code-item');
@@ -31,6 +32,7 @@ export class CodeItem extends ClipboardItem {
 		this._code = new CodeLabel(ext, {
 			style_class: 'code-item-content',
 			language: metadata.language,
+			defer: !loadPreview,
 			y_align: Clutter.ActorAlign.FILL,
 			y_expand: true,
 		});
@@ -65,7 +67,7 @@ export class CodeItem extends ClipboardItem {
 		);
 
 		this.updateCode();
-		this.updateCodeInfo();
+		if (loadPreview) this.loadPreview();
 
 		// Update metadata
 		this._code.connect('notify::language', () => {
@@ -80,6 +82,8 @@ export class CodeItem extends ClipboardItem {
 	}
 
 	private updateCodeInfo() {
+		if (!this._previewLoaded) return;
+
 		const show = this.codeItemSettings.get_boolean('show-code-info');
 		const textCountMode = this.codeItemSettings.get_enum('text-count-mode');
 
@@ -94,10 +98,18 @@ export class CodeItem extends ClipboardItem {
 		}
 	}
 
+	override loadPreview(): void {
+		if (this._previewLoaded) return;
+
+		this._previewLoaded = true;
+		this._code.load();
+		this.updateCode();
+		this.updateCodeInfo();
+	}
+
 	override destroy() {
 		this.codeItemSettings.disconnectObject(this);
 		this.ext.settings.disconnectObject(this._code);
-		this.entry.disconnectObject(this);
 
 		super.destroy();
 	}

@@ -126,6 +126,9 @@ export interface Database {
 	 */
 	close(): Promise<void>;
 
+	/** Flushes pending writes to durable storage. */
+	flush(): Promise<void>;
+
 	/**
 	 * Gets the entries of the database.
 	 */

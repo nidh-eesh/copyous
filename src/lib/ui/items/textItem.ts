@@ -19,8 +19,9 @@ export class TextItem extends ClipboardItem {
 
 	private readonly _text: Label;
 	private _textInfo?: TextInfo;
+	private _previewLoaded = false;
 
-	constructor(ext: CopyousExtension, entry: ClipboardEntry) {
+	constructor(ext: CopyousExtension, entry: ClipboardEntry, loadPreview = false) {
 		super(ext, entry, Icon.Text, _('Text'));
 
 		this.textItemSettings = this.ext.settings.get_child('text-item');
@@ -44,7 +45,7 @@ export class TextItem extends ClipboardItem {
 		entry.connectObject('notify::content', this.updateTextInfo.bind(this));
 
 		this.updateText();
-		this.updateTextInfo();
+		if (loadPreview) this.loadPreview();
 	}
 
 	private updateText() {
@@ -52,6 +53,8 @@ export class TextItem extends ClipboardItem {
 	}
 
 	private updateTextInfo() {
+		if (!this._previewLoaded) return;
+
 		const show = this.textItemSettings.get_boolean('show-text-info');
 		const textCountMode = this.textItemSettings.get_enum('text-count-mode');
 
@@ -65,10 +68,15 @@ export class TextItem extends ClipboardItem {
 		}
 	}
 
+	override loadPreview(): void {
+		if (this._previewLoaded) return;
+		this._previewLoaded = true;
+		this.updateTextInfo();
+	}
+
 	override destroy() {
 		this.textItemSettings.disconnectObject(this);
 		this.ext.settings.disconnectObject(this._text);
-		this.entry.disconnectObject(this);
 
 		super.destroy();
 	}

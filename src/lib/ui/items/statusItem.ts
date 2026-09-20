@@ -12,6 +12,7 @@ import { Icon, loadIcon } from '../../common/icons.js';
 export const State = {
 	Empty: 0,
 	NoResults: 1,
+	Loading: 2,
 } as const;
 
 export type State = (typeof State)[keyof typeof State];
@@ -102,9 +103,12 @@ export class StatusItem extends St.BoxLayout {
 		if (this.state === State.Empty) {
 			this._icon.gicon = this._emptyIcon;
 			this._text.text = _('Clipboard is Empty');
-		} else {
+		} else if (this.state === State.NoResults) {
 			this._icon.gicon = this._noResultsIcon;
 			this._text.text = _('No Items Found');
+		} else {
+			this._icon.gicon = this._emptyIcon;
+			this._text.text = _('Loading Clipboard…');
 		}
 	}
 

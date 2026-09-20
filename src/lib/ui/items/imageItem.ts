@@ -31,10 +31,12 @@ export class ImageItem extends ClipboardItem {
 
 	private readonly _imagePreview: ImagePreview;
 	private _imageInfo?: ContentInfo;
+	private _previewLoaded = false;
+	private _destroyed = false;
 
 	private readonly _cancellable: Gio.Cancellable = new Gio.Cancellable();
 
-	constructor(ext: CopyousExtension, entry: ClipboardEntry) {
+	constructor(ext: CopyousExtension, entry: ClipboardEntry, loadPreview = false) {
 		super(ext, entry, Icon.Image, _('Image'));
 
 		this.imageItemSettings = this.ext.settings.get_child('image-item');
@@ -43,7 +45,7 @@ export class ImageItem extends ClipboardItem {
 		this.add_style_class_name('no-image-info');
 
 		const file = Gio.File.new_for_uri(entry.content);
-		this._imagePreview = new ImagePreview(ext, file);
+		this._imagePreview = new ImagePreview(ext, file, false);
 		this._content.add_child(this._imagePreview);
 
 		// Bind properties
@@ -56,6 +58,7 @@ export class ImageItem extends ClipboardItem {
 		);
 
 		this.updateSettings();
+		if (loadPreview) this.loadPreview();
 
 		// Hover effect
 		this.bind_property('active', this._imagePreview, 'active', GObject.BindingFlags.DEFAULT);
@@ -83,9 +86,15 @@ export class ImageItem extends ClipboardItem {
 	}
 
 	private configureImageInfo() {
+		if (!this._previewLoaded) return;
+
 		if (this._imageInfo === undefined && this.showImageInfo) {
 			createFileInfo(this.ext, Gio.File.new_for_uri(this.entry.content), FileType.Image, this._cancellable)
 				.then((imageInfo) => {
+					if (this._destroyed) {
+						imageInfo.destroy();
+						return;
+					}
 					this._imageInfo = imageInfo;
 					this._content.add_child(this._imageInfo);
 					this.configureImageInfo();
@@ -105,7 +114,17 @@ export class ImageItem extends ClipboardItem {
 		}
 	}
 
+	override loadPreview(): void {
+		if (this._previewLoaded || this._destroyed) return;
+
+		this._previewLoaded = true;
+		this._imagePreview.load();
+		this.updateSettings();
+		this.configureImageInfo();
+	}
+
 	override destroy() {
+		this._destroyed = true;
 		this.imageItemSettings.disconnectObject(this);
 		this._cancellable.cancel();
 

@@ -5,6 +5,7 @@ import Gio from 'gi://Gio';
 import CopyousExtension from '../../extension.js';
 import { ItemType, Tag } from '../common/constants.js';
 import { ClipboardHistory } from '../common/settings.js';
+import { beginTiming } from '../common/timing.js';
 import { ClipboardEntry, Metadata } from './database.js';
 import { MemoryDatabase } from './memory.js';
 
@@ -33,6 +34,9 @@ interface JsonDatabaseModel {
  */
 export class JsonDatabase extends MemoryDatabase {
 	private _saveTimeoutId: number = -1;
+	private _dirtyGeneration: number = 0;
+	private _flushedGeneration: number = 0;
+	private _flushPromise: Promise<void> | null = null;
 
 	constructor(
 		private ext: CopyousExtension,
@@ -112,15 +116,45 @@ export class JsonDatabase extends MemoryDatabase {
 	}
 
 	private save(): void {
+		this._dirtyGeneration++;
 		if (this._saveTimeoutId >= 0) GLib.source_remove(this._saveTimeoutId);
 		this._saveTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
-			this.flush().catch(() => {});
+			this.flush().catch((error) => this.ext.logger.error('Failed to save JSON database', error));
 			this._saveTimeoutId = -1;
 			return GLib.SOURCE_REMOVE;
 		});
 	}
 
-	private async flush(): Promise<void> {
+	public override async flush(): Promise<void> {
+		if (this._saveTimeoutId >= 0) {
+			GLib.source_remove(this._saveTimeoutId);
+			this._saveTimeoutId = -1;
+		}
+
+		if (this._flushPromise) {
+			await this._flushPromise;
+			if (this._flushedGeneration < this._dirtyGeneration) await this.flush();
+			return;
+		}
+
+		if (this._flushedGeneration >= this._dirtyGeneration) return;
+		const generation = this._dirtyGeneration;
+		this._flushPromise = this.writeSnapshot();
+		try {
+			await this._flushPromise;
+			this._flushedGeneration = generation;
+		} finally {
+			this._flushPromise = null;
+		}
+
+		if (this._flushedGeneration < this._dirtyGeneration) await this.flush();
+	}
+
+	private async writeSnapshot(): Promise<void> {
+		const timing = beginTiming((message) => this.ext.logger?.log(message), 'storage.persistence.flush', {
+			backend: 'json',
+		});
+
 		try {
 			const database: JsonDatabaseModel = {
 				version: DATABASE_VERSION,
@@ -145,8 +179,11 @@ export class JsonDatabase extends MemoryDatabase {
 
 			const bytes = new TextEncoder().encode(JSON.stringify(database));
 			await this.file.replace_contents_async(bytes, null, false, Gio.FileCreateFlags.REPLACE_DESTINATION, null);
+			timing.finish({ entries: database.entries.length, bytes: bytes.length });
 		} catch (error) {
+			timing.cancel({ error: true });
 			this.ext.logger.error('Failed to save JSON database', error);
+			throw error;
 		}
 	}
 }

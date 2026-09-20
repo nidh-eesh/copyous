@@ -46,6 +46,10 @@ export class MemoryDatabase implements Database {
 		await this.clear(ClipboardHistory.Clear);
 	}
 
+	public flush(): Promise<void> {
+		return Promise.resolve();
+	}
+
 	public entries(): Promise<ClipboardEntry[]> {
 		const entries = Array.from(this._entries.values()).sort((a, b) => b.datetime.compare(a.datetime));
 		return Promise.resolve(entries);

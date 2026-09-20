@@ -1,4 +1,5 @@
 import Clutter from 'gi://Clutter';
+import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import St from 'gi://St';
 
@@ -23,6 +24,8 @@ export class ClipboardScrollView extends St.ScrollView {
 	private _orientation: Clutter.Orientation = Clutter.Orientation.HORIZONTAL;
 	private _itemWidth: number = 0;
 	private _itemHeight: number = 0;
+	private _loadMoreCallback: (() => void) | null = null;
+	private _loadMoreIdleId = 0;
 
 	private readonly _scrollContainer: ClipboardScrollContainer;
 
@@ -48,6 +51,20 @@ export class ClipboardScrollView extends St.ScrollView {
 
 		this.connect('notify::width', this.scrollbarWorkaround.bind(this));
 		this._scrollContainer.connect('notify::width', this.scrollbarWorkaround.bind(this));
+		this.hadjustment.connectObject(
+			'notify::value',
+			this.maybeLoadMore.bind(this),
+			'changed',
+			this.maybeLoadMore.bind(this),
+			this,
+		);
+		this.vadjustment.connectObject(
+			'notify::value',
+			this.maybeLoadMore.bind(this),
+			'changed',
+			this.maybeLoadMore.bind(this),
+			this,
+		);
 
 		// Connect properties
 		this.ext.settings.connectObject(
@@ -80,6 +97,30 @@ export class ClipboardScrollView extends St.ScrollView {
 
 	public addItem(item: ClipboardItem) {
 		this._scrollContainer.addItem(item);
+	}
+
+	public loadItems(items: ClipboardItem[]) {
+		this._scrollContainer.loadItems(items);
+	}
+
+	public appendItems(items: ClipboardItem[]) {
+		this._scrollContainer.appendItems(items);
+	}
+
+	public syncItems(items: ClipboardItem[]) {
+		this._scrollContainer.syncItems(items);
+	}
+
+	public getItems(): ClipboardItem[] {
+		return this._scrollContainer.getItems();
+	}
+
+	public setLoading(loading: boolean) {
+		this._scrollContainer.setLoading(loading);
+	}
+
+	public setLoadMoreCallback(callback: (() => void) | null) {
+		this._loadMoreCallback = callback;
 	}
 
 	public clearItems() {
@@ -132,6 +173,26 @@ export class ClipboardScrollView extends St.ScrollView {
 				this.hscrollbarPolicy = St.PolicyType.AUTOMATIC;
 			}
 		}
+	}
+
+	private requestMore(): void {
+		if (!this._loadMoreCallback || this._loadMoreIdleId !== 0) return;
+
+		this._loadMoreIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+			this._loadMoreIdleId = 0;
+			this._loadMoreCallback?.();
+			return GLib.SOURCE_REMOVE;
+		});
+	}
+
+	private maybeLoadMore(): void {
+		const adjustment = this._orientation === Clutter.Orientation.HORIZONTAL ? this.hadjustment : this.vadjustment;
+		const scrollable = adjustment.upper - adjustment.page_size;
+		if (scrollable <= 0) return;
+
+		const itemSize = this._orientation === Clutter.Orientation.HORIZONTAL ? this._itemWidth : this._itemHeight;
+		const threshold = Math.max(itemSize * 2, adjustment.page_size);
+		if (adjustment.value + adjustment.page_size >= adjustment.upper - threshold) this.requestMore();
 	}
 
 	override vfunc_key_press_event(event: Clutter.Event): boolean {
@@ -198,7 +259,10 @@ export class ClipboardScrollView extends St.ScrollView {
 
 		const value = Math.clamp(start + delta * step, adjustment.lower, adjustment.upper);
 
-		if (value === adjustment.value) return Clutter.EVENT_STOP;
+		if (value === adjustment.value) {
+			if (delta > 0) this.requestMore();
+			return Clutter.EVENT_STOP;
+		}
 
 		if (animate) {
 			adjustment.ease(value, {
@@ -213,6 +277,9 @@ export class ClipboardScrollView extends St.ScrollView {
 	}
 
 	override destroy() {
+		if (this._loadMoreIdleId !== 0) GLib.source_remove(this._loadMoreIdleId);
+		this._loadMoreIdleId = 0;
+		this._loadMoreCallback = null;
 		this.ext.settings.disconnectObject(this);
 
 		super.destroy();

@@ -274,7 +274,8 @@ export async function tryCreateDirectoryFileInfo(ext: Extension, file: Gio.File)
 
 export function tryCreateImageInfo(file: Gio.File, size: number): ImageInfo | null {
 	try {
-		const [, width, height] = GdkPixbuf.Pixbuf.get_file_info(file.get_path()!);
+		const [format, width, height] = GdkPixbuf.Pixbuf.get_file_info(file.get_path()!);
+		if (!format || width <= 0 || height <= 0) return null;
 		return new ImageInfo(size, width, height);
 	} catch {
 		return null;

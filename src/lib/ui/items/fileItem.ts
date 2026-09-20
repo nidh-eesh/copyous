@@ -45,10 +45,12 @@ export class FileItem extends ClipboardItem {
 	private _thumbnail?: Gio.File | null;
 	private _filePreview?: ContentPreview | null;
 	private _fileInfo?: ContentInfo;
+	private _destroyed: boolean = false;
+	private _previewLoaded = false;
 
 	private readonly _cancellable: Gio.Cancellable = new Gio.Cancellable();
 
-	constructor(ext: CopyousExtension, entry: ClipboardEntry) {
+	constructor(ext: CopyousExtension, entry: ClipboardEntry, loadPreview = false) {
 		super(ext, entry, Icon.File, _('File'));
 
 		this.fileItemSettings = this.ext.settings.get_child('file-item');
@@ -66,9 +68,14 @@ export class FileItem extends ClipboardItem {
 		this._content.add_child(this._file);
 
 		// Bind properties
-		this.fileItemSettings.connectObject('changed', this.updateFilePreview.bind(this), this);
-		const logger = this.ext.logger;
-		this.updateFilePreview().catch(logger.error.bind(logger));
+		this.fileItemSettings.connectObject(
+			'changed',
+			() => {
+				if (this._previewLoaded) this.updateFilePreview().catch(() => {});
+			},
+			this,
+		);
+		if (loadPreview) this.loadPreview();
 	}
 
 	public override search(query: SearchQuery): void {
@@ -77,6 +84,8 @@ export class FileItem extends ClipboardItem {
 	}
 
 	private async updateFilePreview() {
+		if (!this._previewLoaded || this._destroyed) return;
+
 		this._filePreviewVisibility = this.fileItemSettings.get_enum('file-preview-visibility');
 		this._filePreviewTypes = this.fileItemSettings.get_flags('file-preview-types');
 		this._filePreviewExclusionPatterns = this.fileItemSettings.get_strv('file-preview-exclusion-patterns');
@@ -92,8 +101,18 @@ export class FileItem extends ClipboardItem {
 		}
 
 		await this.configureFilePreview();
+		if (this._destroyed) return;
 		await this.configureFileInfo();
+		if (this._destroyed) return;
 		this.configureVisibility();
+	}
+
+	override loadPreview(): void {
+		if (this._previewLoaded || this._destroyed) return;
+
+		this._previewLoaded = true;
+		const logger = this.ext.logger;
+		this.updateFilePreview().catch(logger.error.bind(logger));
 	}
 
 	private showFilePreview(): boolean {
@@ -129,10 +148,17 @@ export class FileItem extends ClipboardItem {
 		if (this._filePreview == null && this.showFilePreview()) {
 			const file = Gio.File.new_for_uri(this.entry.content);
 			if (this._fileType === undefined || this._thumbnail === undefined) {
-				[this._fileType, this._thumbnail] = await getFileType(file);
+				const [fileType, thumbnail] = await getFileType(file);
+				if (this._destroyed) return;
+				[this._fileType, this._thumbnail] = [fileType, thumbnail];
 			}
 
-			this._filePreview = await tryCreateFilePreview(this.ext, file, this._fileType, this._thumbnail);
+			const filePreview = await tryCreateFilePreview(this.ext, file, this._fileType, this._thumbnail);
+			if (this._destroyed) {
+				filePreview?.destroy();
+				return;
+			}
+			this._filePreview = filePreview;
 			if (this._filePreview) {
 				this._content.insert_child_above(this._filePreview, this._file);
 				this.configureVisibility();
@@ -163,10 +189,17 @@ export class FileItem extends ClipboardItem {
 		) {
 			const file = Gio.File.new_for_uri(this.entry.content);
 			if (this._fileType === undefined || this._thumbnail === undefined) {
-				[this._fileType, this._thumbnail] = await getFileType(file);
+				const [fileType, thumbnail] = await getFileType(file);
+				if (this._destroyed) return;
+				[this._fileType, this._thumbnail] = [fileType, thumbnail];
 			}
 
-			this._fileInfo = await createFileInfo(this.ext, file, this._fileType, this._cancellable);
+			const fileInfo = await createFileInfo(this.ext, file, this._fileType, this._cancellable);
+			if (this._destroyed) {
+				fileInfo.destroy();
+				return;
+			}
+			this._fileInfo = fileInfo;
 			this._content.add_child(this._fileInfo);
 			this.configureVisibility();
 		}
@@ -207,6 +240,7 @@ export class FileItem extends ClipboardItem {
 	}
 
 	override destroy() {
+		this._destroyed = true;
 		this.fileItemSettings.disconnectObject(this);
 		this._cancellable.cancel();
 
