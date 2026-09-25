@@ -5,12 +5,13 @@ import type Gda5 from 'gi://Gda?version=5.0';
 import type Gda6 from 'gi://Gda?version=6.0';
 import Gio from 'gi://Gio';
 
-import CopyousExtension from '../../extension.js';
+import type CopyousExtension from '../../extension.js';
 import { ItemType, getDataPath } from '../common/constants.js';
 import { ClipboardHistory } from '../common/settings.js';
-import { ClipboardEntry, Database, Metadata } from './database.js';
+import { ClipboardEntry, Database, DatabaseSearch, Metadata } from './database.js';
 
-const DATABASE_VERSION = 2;
+const DATABASE_VERSION = 3;
+const ASYNC_JOB_MAX_POLLS = 600;
 
 interface SqlBuilder<T> extends Omit<Gda5.SqlBuilder, 'add_field_value_as_gvalue'> {
 	add_id<K extends Extract<keyof T, string>>(str: K): Gda5.SqlBuilderId;
@@ -58,8 +59,9 @@ function open_async(connection: Gda5.Connection | Gda6.Connection): Promise<bool
 			// Gda 6
 			GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
 				try {
-					connection.set_main_context(null, GLib.MainContext.ref_thread_default());
-					connection.open_async((_cnc, _jobId, result) => resolve(result));
+					// Gda's async callback can be lost when an extension is reloaded in the
+					// shared Shell context. Opening the local SQLite connection is immediate.
+					resolve(connection.open());
 				} catch (error) {
 					reject(error as Error);
 				}
@@ -125,7 +127,7 @@ function async_statement_execute_select<T>(
 						return GLib.SOURCE_REMOVE;
 					}
 
-					if (i >= 10) {
+					if (i >= ASYNC_JOB_MAX_POLLS) {
 						reject(new Error('Timeout'));
 						cancellable.disconnect(cancellableId);
 						return GLib.SOURCE_REMOVE;
@@ -190,7 +192,7 @@ function async_statement_execute_non_select(
 						return GLib.SOURCE_REMOVE;
 					}
 
-					if (i >= 10) {
+					if (i >= ASYNC_JOB_MAX_POLLS) {
 						reject(new Error('Timeout'));
 						cancellable.disconnect(cancellableId);
 						return GLib.SOURCE_REMOVE;
@@ -223,9 +225,34 @@ function async_statement_execute_non_select(
 	});
 }
 
+function async_select_command<T>(connection: Gda5.Connection | Gda6.Connection, sql: string): Promise<DataModel<T>> {
+	return new Promise((resolve, reject) => {
+		GLib.idle_add(GLib.PRIORITY_HIGH, () => {
+			try {
+				resolve(connection.execute_select_command(sql) as DataModel<T>);
+			} catch (error) {
+				reject(error as Error);
+			}
+			return GLib.SOURCE_REMOVE;
+		});
+	});
+}
+
 // Remove double backslashes since libgda's sqlite escaping is broken
 function unescapeContent(content: string): string {
 	return content.replace(/\\\\/g, '\\');
+}
+
+function sqlString(value: string): string {
+	return `'${value.replaceAll("'", "''")}'`;
+}
+
+function likePattern(value: string): string {
+	return `%${value.replaceAll('^', '^^').replaceAll('%', '^%').replaceAll('_', '^_')}%`;
+}
+
+function ftsPhrase(value: string): string {
+	return `"${value.replaceAll('"', '""')}"`;
 }
 
 /**
@@ -235,6 +262,7 @@ export class GdaDatabase implements Database {
 	private readonly _Gda: typeof Gda;
 	private readonly _connection: Gda.Connection;
 	private readonly _cancellable: Gio.Cancellable = new Gio.Cancellable();
+	private _ftsAvailable: boolean = false;
 
 	constructor(
 		private ext: CopyousExtension,
@@ -337,6 +365,8 @@ export class GdaDatabase implements Database {
 			}
 		}
 
+		await this.initializeSearchIndexes();
+
 		// Update to current version
 		if (version !== DATABASE_VERSION) {
 			// UPDATE 'version' SET version=DATABASE_VERSION
@@ -347,6 +377,89 @@ export class GdaDatabase implements Database {
 			await async_statement_execute_non_select(this._Gda, this._connection, setVersionStmt, this._cancellable);
 
 			this.ext.logger.log(`Migrated database version from ${version} to ${DATABASE_VERSION}.`);
+		}
+	}
+
+	private async executeSql(sql: string): Promise<void> {
+		const [statement] = this._connection.parse_sql_string(sql);
+		await async_statement_execute_non_select(this._Gda, this._connection, statement, this._cancellable);
+	}
+
+	private async searchTableExists(): Promise<boolean> {
+		const [statement] = this._connection.parse_sql_string(
+			"SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'clipboard_search' LIMIT 1",
+		);
+		const model = await async_statement_execute_select<{ name: string }>(
+			this._Gda,
+			this._connection,
+			statement,
+			this._cancellable,
+		);
+		return model.get_n_rows() > 0;
+	}
+
+	private async initializeSearchIndexes(): Promise<void> {
+		for (const sql of [
+			'CREATE INDEX IF NOT EXISTS clipboard_datetime_idx ON clipboard (datetime DESC, id DESC)',
+			'CREATE INDEX IF NOT EXISTS clipboard_type_datetime_idx ON clipboard (type, datetime DESC, id DESC)',
+			'CREATE INDEX IF NOT EXISTS clipboard_tag_datetime_idx ON clipboard (tag, datetime DESC, id DESC)',
+			'CREATE INDEX IF NOT EXISTS clipboard_pinned_datetime_idx ON clipboard (pinned, datetime DESC, id DESC)',
+		]) {
+			// Search-index DDL must be serialized on the single Gda connection.
+			// eslint-disable-next-line no-await-in-loop
+			await this.executeSql(sql);
+		}
+
+		let existed = false;
+		try {
+			existed = await this.searchTableExists();
+			await this.executeSql(`
+				CREATE VIRTUAL TABLE IF NOT EXISTS clipboard_search USING fts5(
+					content,
+					title,
+					metadata,
+					content = 'clipboard',
+					content_rowid = 'id',
+					tokenize = 'trigram'
+				)`);
+			await this.executeSql(`
+				CREATE TRIGGER IF NOT EXISTS clipboard_search_insert AFTER INSERT ON clipboard BEGIN
+					INSERT INTO clipboard_search(rowid, content, title, metadata)
+					VALUES (new.id, new.content, COALESCE(new.title, ''), COALESCE(new.metadata, ''));
+				END`);
+			await this.executeSql(`
+				CREATE TRIGGER IF NOT EXISTS clipboard_search_delete AFTER DELETE ON clipboard BEGIN
+					INSERT INTO clipboard_search(clipboard_search, rowid, content, title, metadata)
+					VALUES ('delete', old.id, old.content, COALESCE(old.title, ''), COALESCE(old.metadata, ''));
+				END`);
+			await this.executeSql(`
+				CREATE TRIGGER IF NOT EXISTS clipboard_search_update AFTER UPDATE OF content, title, metadata ON clipboard BEGIN
+					INSERT INTO clipboard_search(clipboard_search, rowid, content, title, metadata)
+					VALUES ('delete', old.id, old.content, COALESCE(old.title, ''), COALESCE(old.metadata, ''));
+					INSERT INTO clipboard_search(rowid, content, title, metadata)
+					VALUES (new.id, new.content, COALESCE(new.title, ''), COALESCE(new.metadata, ''));
+				END`);
+			if (!existed) await this.executeSql("INSERT INTO clipboard_search(clipboard_search) VALUES ('rebuild')");
+			this._ftsAvailable = true;
+		} catch (error) {
+			this._ftsAvailable = false;
+			this.ext.logger.warn('Trigram search index unavailable; using archive scan fallback', error);
+			if (!existed) {
+				for (const sql of [
+					'DROP TRIGGER IF EXISTS clipboard_search_insert',
+					'DROP TRIGGER IF EXISTS clipboard_search_delete',
+					'DROP TRIGGER IF EXISTS clipboard_search_update',
+					'DROP TABLE IF EXISTS clipboard_search',
+				]) {
+					try {
+						// Cleanup uses the same connection and must preserve statement order.
+						// eslint-disable-next-line no-await-in-loop
+						await this.executeSql(sql);
+					} catch {
+						// Preserve the primary clipboard table even if optional index cleanup fails.
+					}
+				}
+			}
 		}
 	}
 
@@ -406,9 +519,8 @@ export class GdaDatabase implements Database {
 		return Promise.resolve();
 	}
 
-	public async entries(): Promise<ClipboardEntry[]> {
+	public async entries(limit?: number): Promise<ClipboardEntry[]> {
 		try {
-			// SELECT * FROM clipboard
 			const builder = new this._Gda.SqlBuilder({ stmt_type: this._Gda.SqlStatementType.SELECT });
 			builder.select_add_target('clipboard', null);
 			builder.select_add_field('id', null, null);
@@ -420,61 +532,144 @@ export class GdaDatabase implements Database {
 			builder.select_add_field('metadata', null, null);
 			builder.select_add_field('title', null, null);
 			builder.select_order_by(datetimeId, false, null);
-
-			const stmt = builder.get_statement();
-			const dataModel = await async_statement_execute_select<ClipboardEntry>(
-				this._Gda,
-				this._connection,
-				stmt,
-				this._cancellable,
-			);
-
-			const entries: ClipboardEntry[] = [];
-			const iter = dataModel.create_iter();
-			while (iter.move_next()) {
-				const id = iter.get_value_for_field('id');
-				const type = iter.get_value_for_field('type');
-				const content = unescapeContent(iter.get_value_for_field('content'));
-				const pinned = iter.get_value_for_field('pinned');
-				const tag = iter.get_value_for_field('tag');
-				let datetime = iter.get_value_for_field('datetime');
-				const metadata = iter.get_value_for_field('metadata') as string | null;
-				const title = (iter.get_value_for_field('title') as string | null) ?? '';
-
-				if ('Timestamp' in this._Gda && datetime instanceof this._Gda.Timestamp) {
-					const timezone = GLib.TimeZone.new_offset(datetime.timezone);
-					datetime = GLib.DateTime.new(
-						timezone,
-						datetime.year,
-						datetime.month,
-						datetime.day,
-						datetime.hour,
-						datetime.minute,
-						datetime.second,
-					);
-				}
-
-				let metadataObj: Metadata | null = null;
-				if (metadata) {
-					try {
-						const json = JSON.parse(metadata) as object | null;
-						if (json) {
-							metadataObj = json as Metadata;
-						}
-					} catch {
-						this.ext.logger.error('Failed to parse metadata');
-					}
-				}
-
-				entries.push(new ClipboardEntry(id, type, content, pinned, tag, datetime, metadataObj, title));
+			if (limit !== undefined) {
+				builder.select_set_limit(
+					add_expr_value(builder, Math.max(0, Math.trunc(limit))),
+					add_expr_value(builder, 0),
+				);
 			}
 
-			return entries;
+			return await this.entriesFromStatement(builder.get_statement());
 		} catch (e) {
 			this.ext.logger.error('Failed to get clipboard entries', e);
 		}
 
 		return [];
+	}
+
+	public async get(id: number): Promise<ClipboardEntry | null> {
+		try {
+			const builder = new this._Gda.SqlBuilder({ stmt_type: this._Gda.SqlStatementType.SELECT });
+			builder.select_add_target('clipboard', null);
+			builder.select_add_field('id', null, null);
+			builder.select_add_field('type', null, null);
+			builder.select_add_field('content', null, null);
+			builder.select_add_field('pinned', null, null);
+			builder.select_add_field('tag', null, null);
+			builder.select_add_field('datetime', null, null);
+			builder.select_add_field('metadata', null, null);
+			builder.select_add_field('title', null, null);
+			builder.set_where(
+				builder.add_cond(this._Gda.SqlOperatorType.EQ, builder.add_id('id'), add_expr_value(builder, id), 0),
+			);
+			builder.select_set_limit(add_expr_value(builder, 1), add_expr_value(builder, 0));
+
+			const entries = await this.entriesFromStatement(builder.get_statement());
+			return entries[0] ?? null;
+		} catch (error) {
+			this.ext.logger.error(`Failed to get clipboard entry ${id}`, error);
+			throw error;
+		}
+	}
+
+	public async search(search: DatabaseSearch, limit: number): Promise<ClipboardEntry[]> {
+		try {
+			const conditions: string[] = [];
+			let from = 'clipboard';
+			let orderBy = 'clipboard.datetime DESC, clipboard.id DESC';
+			if (search.query.length > 0) {
+				if (this._ftsAvailable && [...search.query].length >= 3) {
+					from += ' JOIN clipboard_search ON clipboard_search.rowid = clipboard.id';
+					conditions.push(`clipboard_search MATCH ${sqlString(ftsPhrase(search.query))}`);
+					// FTS5 can stream rowids in descending order without sorting every match.
+					orderBy = 'clipboard_search.rowid DESC';
+				} else {
+					const pattern = sqlString(likePattern(search.query));
+					conditions.push(
+						`(clipboard.content LIKE ${pattern} ESCAPE '^' OR ` +
+							`clipboard.title LIKE ${pattern} ESCAPE '^' OR ` +
+							`clipboard.metadata LIKE ${pattern} ESCAPE '^')`,
+					);
+				}
+			}
+
+			if (search.pinned) conditions.push('clipboard.pinned = 1');
+			else if (search.excludePinned) conditions.push('clipboard.pinned = 0');
+			if (search.tag !== null) conditions.push(`clipboard.tag = ${sqlString(search.tag)}`);
+			else if (search.excludeTagged) conditions.push('clipboard.tag IS NULL');
+			if (search.type !== null) conditions.push(`clipboard.type = ${sqlString(search.type)}`);
+
+			const boundedLimit = Math.max(1, Math.min(500, Math.trunc(limit)));
+			const where = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : '';
+			const sql = `
+				SELECT clipboard.id AS id,
+					clipboard.type AS type,
+					clipboard.content AS content,
+					clipboard.pinned AS pinned,
+					clipboard.tag AS tag,
+					clipboard.datetime AS datetime,
+					clipboard.metadata AS metadata,
+					clipboard.title AS title
+				FROM ${from}${where}
+				ORDER BY ${orderBy}
+				LIMIT ${boundedLimit}`;
+
+			return this.entriesFromModel(await async_select_command<ClipboardEntry>(this._connection, sql));
+		} catch (error) {
+			this.ext.logger.error('Failed to search clipboard archive', error);
+			return [];
+		}
+	}
+
+	private async entriesFromStatement(statement: Gda.Statement): Promise<ClipboardEntry[]> {
+		const dataModel = await async_statement_execute_select<ClipboardEntry>(
+			this._Gda,
+			this._connection,
+			statement,
+			this._cancellable,
+		);
+		return this.entriesFromModel(dataModel);
+	}
+
+	private entriesFromModel(dataModel: DataModel<ClipboardEntry>): ClipboardEntry[] {
+		const entries: ClipboardEntry[] = [];
+		const iter = dataModel.create_iter();
+		while (iter.move_next()) {
+			const id = iter.get_value_for_field('id');
+			const type = iter.get_value_for_field('type');
+			const content = unescapeContent(iter.get_value_for_field('content'));
+			const pinned = iter.get_value_for_field('pinned');
+			const tag = iter.get_value_for_field('tag');
+			let datetime = iter.get_value_for_field('datetime');
+			const metadata = iter.get_value_for_field('metadata') as string | null;
+			const title = (iter.get_value_for_field('title') as string | null) ?? '';
+
+			if ('Timestamp' in this._Gda && datetime instanceof this._Gda.Timestamp) {
+				const timezone = GLib.TimeZone.new_offset(datetime.timezone);
+				datetime = GLib.DateTime.new(
+					timezone,
+					datetime.year,
+					datetime.month,
+					datetime.day,
+					datetime.hour,
+					datetime.minute,
+					datetime.second,
+				);
+			}
+
+			let metadataObj: Metadata | null = null;
+			if (metadata) {
+				try {
+					const json = JSON.parse(metadata) as object | null;
+					if (json) metadataObj = json as Metadata;
+				} catch {
+					this.ext.logger.error('Failed to parse metadata');
+				}
+			}
+
+			entries.push(new ClipboardEntry(id, type, content, pinned, tag, datetime, metadataObj, title));
+		}
+		return entries;
 	}
 
 	public async selectConflict(entry: ClipboardEntry | { type: ItemType; content: string }): Promise<number | null> {
@@ -568,6 +763,11 @@ export class GdaDatabase implements Database {
 		property: K,
 	): Promise<number> {
 		try {
+			if (property === 'type' || property === 'content') {
+				const conflictId = await this.selectConflict(entry);
+				if (conflictId !== null && conflictId !== entry.id) return conflictId;
+			}
+
 			let value = entry[property] ?? 'NULL';
 			if (property === 'metadata') value = JSON.stringify(entry['metadata']);
 			else if (property === 'datetime') value = convert_datetime(entry['datetime']);

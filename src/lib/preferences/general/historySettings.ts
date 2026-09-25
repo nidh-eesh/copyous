@@ -141,8 +141,14 @@ export class HistorySettings extends Adw.PreferencesGroup {
 
 		const historyLength = new Adw.SpinRow({
 			title: _('History Length'),
-			subtitle: _('Select how many items to keep in the clipboard history'),
-			adjustment: new Gtk.Adjustment({ lower: 10, upper: 500, step_increment: 1, page_increment: 5, value: 50 }),
+			subtitle: _('Maximum number of unpinned and untagged items to keep in the clipboard archive'),
+			adjustment: new Gtk.Adjustment({
+				lower: 10,
+				upper: 1000000,
+				step_increment: 10,
+				page_increment: 1000,
+				value: 50,
+			}),
 		});
 		this.add(historyLength);
 

@@ -297,7 +297,9 @@ export class CodeLabel extends St.Label {
 		}
 
 		// Update text after hljs is loaded
-		this._disconnectHljsInit = this.ext.connectHljsInit(this.updateText.bind(this));
+		this._disconnectHljsInit = this.ext.connectHljsInit(() => {
+			if (this._loaded) this.updateText();
+		});
 
 		if (this._loaded) this.updateText();
 	}

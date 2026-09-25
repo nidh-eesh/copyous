@@ -8,7 +8,7 @@ import { ItemType, getDefaultDatabaseFile } from '../common/constants.js';
 import { ClipboardHistory, DatabaseBackend } from '../common/settings.js';
 import { beginTiming } from '../common/timing.js';
 import { getLinkImagePath } from '../misc/link.js';
-import { ClipboardEntry, Database, Metadata } from './database.js';
+import { ClipboardEntry, Database, DatabaseSearch, Metadata } from './database.js';
 import { GdaDatabase } from './gda.js';
 import { JsonDatabase } from './json.js';
 import { MemoryDatabase } from './memory.js';
@@ -24,16 +24,29 @@ function delay(milliseconds: number): Promise<void> {
 	});
 }
 
+const HOT_HISTORY_ITEMS = 500;
+
+export const ARCHIVE_SEARCH_ITEMS = 200;
+
+export interface ArchiveSearchResult {
+	revision: number;
+	entries: ClipboardEntry[];
+}
+
 export class ClipboardEntryTracker {
 	private _database: Database | undefined;
 	private readonly _store: ClipboardStore;
 	private _storageIds = new WeakMap<ClipboardEntry, number>();
+	private readonly _entriesByStorageId = new Map<number, ClipboardEntry>();
+	private readonly _hotEntries = new Set<ClipboardEntry>();
+	private readonly _archiveEntries = new Set<ClipboardEntry>();
 	private readonly _signalIds = new Map<ClipboardEntry, number[]>();
 	private readonly _persistenceQueue: PersistenceQueue;
 	private _initTail: Promise<void> = Promise.resolve();
 	private _ready: Promise<void> = Promise.resolve();
 	private _fromDefault: boolean = false;
 	private _storageWarningShown: boolean = false;
+	private _archiveRevision: number = 0;
 
 	constructor(private ext: CopyousExtension) {
 		this._store = new ClipboardStore((message) => this.ext.logger?.log(message));
@@ -61,8 +74,50 @@ export class ClipboardEntryTracker {
 		return this._store.has(entry);
 	}
 
+	public isHot(entry: ClipboardEntry): boolean {
+		return this._hotEntries.has(entry);
+	}
+
 	public entries(): ClipboardEntry[] {
 		return this._store.snapshot();
+	}
+
+	public async searchArchive(search: DatabaseSearch): Promise<ArchiveSearchResult> {
+		await this._ready;
+		const revision = this._archiveRevision;
+		const entries = (await this._database?.search(search, ARCHIVE_SEARCH_ITEMS)) ?? [];
+		return { revision, entries };
+	}
+
+	public replaceArchiveEntries(result: ArchiveSearchResult): ClipboardEntry[] {
+		if (result.revision !== this._archiveRevision) {
+			this.evictArchiveEntries();
+			return [];
+		}
+
+		this.evictArchiveEntries();
+		const adopted: ClipboardEntry[] = [];
+		for (const storedEntry of result.entries) {
+			const existing =
+				this._entriesByStorageId.get(storedEntry.id) ??
+				this._store.findConflict(storedEntry.type, storedEntry.content);
+			if (existing) {
+				adopted.push(existing);
+				continue;
+			}
+
+			const entry = this._store.adopt(storedEntry);
+			this.bindStorage(entry, storedEntry.id);
+			this._archiveEntries.add(entry);
+			this.track(entry);
+			adopted.push(entry);
+		}
+		return adopted;
+	}
+
+	public clearArchiveEntries(): void {
+		this._archiveRevision++;
+		this.evictArchiveEntries();
 	}
 
 	public init(): Promise<ClipboardEntry[]> {
@@ -79,6 +134,10 @@ export class ClipboardEntryTracker {
 		this.untrackAll();
 		this._store.clear();
 		this._storageIds = new WeakMap<ClipboardEntry, number>();
+		this._entriesByStorageId.clear();
+		this._hotEntries.clear();
+		this._archiveEntries.clear();
+		this._archiveRevision++;
 
 		const backend: DatabaseBackend = this.ext.settings.get_enum('database-backend');
 		const file = this.getFile();
@@ -128,7 +187,8 @@ export class ClipboardEntryTracker {
 		this._store.hydrate(entries);
 		for (const entry of entries) {
 			if (!this._store.has(entry)) continue;
-			this._storageIds.set(entry, entry.id);
+			this.bindStorage(entry, entry.id);
+			this._hotEntries.add(entry);
 			this.track(entry);
 		}
 
@@ -187,7 +247,7 @@ export class ClipboardEntryTracker {
 			snapshotTiming = beginTiming((message) => this.ext.logger?.log(message), 'storage.backend.snapshot', {
 				backend: 'sqlite',
 			});
-			const entries = await this._database.entries();
+			const entries = await this._database.entries(HOT_HISTORY_ITEMS);
 			snapshotTiming.finish({ entries: entries.length });
 			return entries;
 		} catch (error) {
@@ -216,7 +276,7 @@ export class ClipboardEntryTracker {
 			snapshotTiming = beginTiming((message) => this.ext.logger?.log(message), 'storage.backend.snapshot', {
 				backend: 'json',
 			});
-			const entries = await this._database.entries();
+			const entries = await this._database.entries(HOT_HISTORY_ITEMS);
 			snapshotTiming.finish({ entries: entries.length });
 			return entries;
 		} catch (error) {
@@ -245,9 +305,9 @@ export class ClipboardEntryTracker {
 		if (!this._database) return;
 
 		const selectedHistory = history ?? this.ext.settings.get_enum('clipboard-history');
+		if (selectedHistory === ClipboardHistory.KeepAll) return;
 		const removed = this._store.clearCandidates(selectedHistory);
-		if (removed.length === 0) return;
-
+		this._archiveRevision++;
 		for (const entry of removed) this.removeLocal(entry, true);
 		this.removePendingUpdates(removed);
 
@@ -270,6 +330,9 @@ export class ClipboardEntryTracker {
 		this._database = undefined;
 		this.untrackAll();
 		this._store.clear();
+		this._entriesByStorageId.clear();
+		this._hotEntries.clear();
+		this._archiveEntries.clear();
 	}
 
 	public async insert(
@@ -283,12 +346,16 @@ export class ClipboardEntryTracker {
 
 		const conflict = this._store.findConflict(type, content);
 		if (conflict) {
+			this._archiveEntries.delete(conflict);
+			this._hotEntries.add(conflict);
 			conflict.datetime = GLib.DateTime.new_now_utc();
+			this.trimHotEntries();
 			return null;
 		}
 
 		const entry = this._store.create(type, content, metadata);
 		if (!entry) return null;
+		this._hotEntries.add(entry);
 		this.track(entry);
 
 		const insertedType = type;
@@ -298,12 +365,17 @@ export class ClipboardEntryTracker {
 			kind: 'insert',
 			group: this.entryGroup(entry),
 			run: async () => {
-				const stored = await database.insert(insertedType, insertedContent, insertedMetadata);
-				if (!stored) throw new Error('Failed to persist clipboard entry');
-				this._storageIds.set(entry, stored.id);
+				let storageId = await database.selectConflict({ type: insertedType, content: insertedContent });
+				if (storageId === null) {
+					const stored = await database.insert(insertedType, insertedContent, insertedMetadata);
+					if (!stored) throw new Error('Failed to persist clipboard entry');
+					storageId = stored.id;
+				}
+				this.bindStorage(entry, storageId);
 
 				const persistedEntry = this.toStorageEntry(entry);
 				await database.updateProperty(persistedEntry, 'datetime');
+				this.trimHotEntries();
 			},
 		});
 		this.enqueueFlush(database);
@@ -313,13 +385,7 @@ export class ClipboardEntryTracker {
 	}
 
 	public checkOldest(): boolean {
-		const minutes = this.ext.settings.get_int('history-time');
-		if (minutes === 0) return false;
-
-		const cutoff = GLib.DateTime.new_now_utc().add_minutes(-minutes)!;
-		return this._store
-			.snapshot()
-			.some((entry) => !(entry.pinned || entry.tag) && entry.datetime.compare(cutoff) < 0);
+		return this.ext.settings.get_int('history-time') > 0;
 	}
 
 	public async deleteOldest(): Promise<void> {
@@ -334,16 +400,30 @@ export class ClipboardEntryTracker {
 		const limit = this.ext.settings.get_int('history-length');
 		const minutes = this.ext.settings.get_int('history-time');
 		const removed = this._store.retentionCandidates(limit, minutes);
-		if (removed.length === 0) return;
-
+		const removedByStorageId = new Map<number, ClipboardEntry>();
+		for (const entry of removed) {
+			const storageId = this._storageIds.get(entry);
+			if (storageId !== undefined) removedByStorageId.set(storageId, entry);
+		}
+		if (removed.length > 0) this._archiveRevision++;
 		for (const entry of removed) this.removeLocal(entry, true);
 		this.removePendingUpdates(removed);
 		this._persistenceQueue.enqueue({
 			kind: 'retention',
-			barrier: true,
+			key: 'archive-retention',
+			trailing: true,
 			run: async () => {
-				await database.deleteOldest(limit, minutes);
-				removed.forEach((entry) => this.cleanupEntryAssets(entry));
+				const deletedIds = await database.deleteOldest(limit, minutes);
+				for (const storageId of deletedIds) {
+					const loadedEntry = this._entriesByStorageId.get(storageId);
+					if (loadedEntry) {
+						this.removeLocal(loadedEntry, true);
+						this.cleanupEntryAssets(loadedEntry);
+					} else {
+						const removedEntry = removedByStorageId.get(storageId);
+						if (removedEntry) this.cleanupEntryAssets(removedEntry);
+					}
+				}
 			},
 		});
 		this.enqueueFlush(database);
@@ -392,11 +472,44 @@ export class ClipboardEntryTracker {
 				const persistedEntry = this.toStorageEntry(entry);
 				const conflictId = await database.updateProperty(persistedEntry, property);
 				if (conflictId >= 0) {
-					this.ext.logger.warn(`Persistent clipboard conflict for entry ${entry.id}`);
+					await this.resolvePersistentConflict(database, entry, persistedEntry, conflictId);
 				}
 			},
 		});
 		this.enqueueFlush(database);
+	}
+
+	private async resolvePersistentConflict(
+		database: Database,
+		entry: ClipboardEntry,
+		persistedEntry: ClipboardEntry,
+		conflictId: number,
+	): Promise<void> {
+		const source = await database.get(persistedEntry.id);
+		const conflict = await database.get(conflictId);
+		if (!source || !conflict) throw new Error(`Failed to resolve persistent conflict for entry ${entry.id}`);
+
+		await database.delete(source);
+		this.cleanupEntryAssets(source);
+		this._archiveRevision++;
+		this._persistenceQueue.removePending((task) => task.kind === 'update' && task.group === this.entryGroup(entry));
+
+		const touchedAt = entry.datetime;
+		this.untrack(entry);
+		if (this._entriesByStorageId.get(source.id) === entry) this._entriesByStorageId.delete(source.id);
+		this.bindStorage(entry, conflict.id);
+		entry.type = conflict.type;
+		entry.content = conflict.content;
+		entry.pinned = conflict.pinned;
+		entry.tag = conflict.tag;
+		entry.metadata = conflict.metadata;
+		entry.title = conflict.title;
+		entry.datetime = touchedAt;
+		this._store.reindex(entry);
+		this._store.reorder(entry);
+		this.track(entry);
+
+		await database.updateProperty(this.toStorageEntry(entry), 'datetime');
 	}
 
 	private remove(entry: ClipboardEntry): void {
@@ -404,6 +517,7 @@ export class ClipboardEntryTracker {
 		const database = this._database;
 		if (!database) return;
 
+		this._archiveRevision++;
 		this.removeLocal(entry, false);
 		const group = this.entryGroup(entry);
 		this._persistenceQueue.removePending((task) => task.group === group && task.kind === 'update');
@@ -434,8 +548,37 @@ export class ClipboardEntryTracker {
 		});
 	}
 
+	private bindStorage(entry: ClipboardEntry, storageId: number): void {
+		this._storageIds.set(entry, storageId);
+		this._entriesByStorageId.set(storageId, entry);
+	}
+
+	private trimHotEntries(): void {
+		if (this._hotEntries.size <= HOT_HISTORY_ITEMS) return;
+
+		const oldestFirst = this._store
+			.snapshot()
+			.filter((entry) => this._hotEntries.has(entry))
+			.reverse();
+		for (const entry of oldestFirst) {
+			if (this._hotEntries.size <= HOT_HISTORY_ITEMS) break;
+			if (this._storageIds.get(entry) === undefined) continue;
+			this.removeLocal(entry, true);
+		}
+	}
+
+	private evictArchiveEntries(): void {
+		for (const entry of [...this._archiveEntries]) this.removeLocal(entry, false);
+	}
+
 	private removeLocal(entry: ClipboardEntry, emitDelete: boolean): void {
 		if (!this._store.remove(entry)) return;
+		const storageId = this._storageIds.get(entry);
+		if (storageId !== undefined && this._entriesByStorageId.get(storageId) === entry) {
+			this._entriesByStorageId.delete(storageId);
+		}
+		this._hotEntries.delete(entry);
+		this._archiveEntries.delete(entry);
 		this.untrack(entry);
 		if (emitDelete) entry.emit('delete');
 	}

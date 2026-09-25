@@ -26,6 +26,7 @@ export class ClipboardScrollView extends St.ScrollView {
 	private _itemHeight: number = 0;
 	private _loadMoreCallback: (() => void) | null = null;
 	private _loadMoreIdleId = 0;
+	private _hasMore = false;
 
 	private readonly _scrollContainer: ClipboardScrollContainer;
 
@@ -119,6 +120,18 @@ export class ClipboardScrollView extends St.ScrollView {
 		this._scrollContainer.setLoading(loading);
 	}
 
+	public setSearchActive(searchActive: boolean) {
+		this._scrollContainer.setSearchActive(searchActive);
+	}
+
+	public setHasMore(hasMore: boolean) {
+		this._hasMore = hasMore;
+	}
+
+	public loadMoreIfNeeded(): void {
+		this.maybeLoadMore();
+	}
+
 	public setLoadMoreCallback(callback: (() => void) | null) {
 		this._loadMoreCallback = callback;
 	}
@@ -186,9 +199,13 @@ export class ClipboardScrollView extends St.ScrollView {
 	}
 
 	private maybeLoadMore(): void {
+		if (!this._hasMore) return;
 		const adjustment = this._orientation === Clutter.Orientation.HORIZONTAL ? this.hadjustment : this.vadjustment;
 		const scrollable = adjustment.upper - adjustment.page_size;
-		if (scrollable <= 0) return;
+		if (scrollable <= 0) {
+			this.requestMore();
+			return;
+		}
 
 		const itemSize = this._orientation === Clutter.Orientation.HORIZONTAL ? this._itemWidth : this._itemHeight;
 		const threshold = Math.max(itemSize * 2, adjustment.page_size);
@@ -280,6 +297,7 @@ export class ClipboardScrollView extends St.ScrollView {
 		if (this._loadMoreIdleId !== 0) GLib.source_remove(this._loadMoreIdleId);
 		this._loadMoreIdleId = 0;
 		this._loadMoreCallback = null;
+		this._hasMore = false;
 		this.ext.settings.disconnectObject(this);
 
 		super.destroy();

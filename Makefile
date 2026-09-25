@@ -34,6 +34,7 @@ endif
 .PHONY: all clean
 .PHONY: database
 .PHONY: lint
+.PHONY: test benchmark
 .PHONY: pot po check-pot check-po
 .PHONY: build install uninstall
 .PHONY: launch launch-profile launch-settings
@@ -66,6 +67,13 @@ lint:
 lint-fix:
 	pnpm exec eslint src --ext .ts --fix
 	pnpm exec prettier src resources/css --write
+
+test: $(DIST_ZIP)
+	pnpm tsx scripts/tests/memory-first-store.test.ts
+	gjs -m scripts/tests/archive-database.test.mjs
+
+benchmark:
+	pnpm tsx scripts/tests/memory-first-store.bench.ts
 
 shexli: $(DIST_ZIP)
 	uv run python -m shexli $< --format json | pnpm tsx ./scripts/shexli/transform-output.ts

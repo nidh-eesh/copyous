@@ -11,7 +11,7 @@ import { DbusService } from './lib/common/dbus.js';
 import { ClipboardHistory, CopyousSettings, migrateSettings } from './lib/common/settings.js';
 import { SoundManager, tryCreateSoundManager } from './lib/common/sound.js';
 import { beginTiming, timingEvent } from './lib/common/timing.js';
-import { ClipboardEntry } from './lib/database/database.js';
+import { ClipboardEntry, DatabaseSearch } from './lib/database/database.js';
 import { ClipboardEntryTracker } from './lib/database/entryTracker.js';
 import { ClipboardManager } from './lib/misc/clipboard.js';
 import { NotificationManager } from './lib/misc/notifications.js';
@@ -19,6 +19,7 @@ import { ShortcutManager } from './lib/misc/shortcuts.js';
 import { ThemeManager } from './lib/misc/theme.js';
 import { ClipboardDialog } from './lib/ui/clipboardDialog.js';
 import { ClipboardIndicator } from './lib/ui/indicator.js';
+import { SearchQuery } from './lib/ui/searchEntry.js';
 
 export default class CopyousExtension extends Extension {
 	public settings!: CopyousSettings;
@@ -45,6 +46,8 @@ export default class CopyousExtension extends Extension {
 	private entryTrackerInitSerial: number = 0;
 	private historyTimeoutId: number = -1;
 	private updateHistory: boolean = false;
+	private archiveSearchTimeoutId: number = -1;
+	private archiveSearchSerial: number = 0;
 
 	public clipboardManager: ClipboardManager | undefined;
 
@@ -84,6 +87,9 @@ export default class CopyousExtension extends Extension {
 			},
 			'clear-history',
 			(_: unknown, history: ClipboardHistory) => this.entryTracker?.clear(history),
+			'search-history',
+			(_: unknown, query: SearchQuery, hasHotMatches: boolean) =>
+				this.scheduleArchiveSearch(query, hasHotMatches),
 			this,
 		);
 
@@ -139,6 +145,8 @@ export default class CopyousExtension extends Extension {
 			this.initEntryTracker.bind(this),
 			'changed::database-backend',
 			this.initEntryTracker.bind(this),
+			'changed::history-length',
+			() => this.entryTracker?.deleteOldest().catch(error),
 			'changed::history-time',
 			this.initHistoryTimeout.bind(this),
 			this,
@@ -171,6 +179,48 @@ export default class CopyousExtension extends Extension {
 			},
 			this,
 		);
+	}
+
+	private scheduleArchiveSearch(query: SearchQuery, hasHotMatches: boolean): void {
+		const serial = ++this.archiveSearchSerial;
+		if (this.archiveSearchTimeoutId >= 0) GLib.source_remove(this.archiveSearchTimeoutId);
+		this.archiveSearchTimeoutId = -1;
+		this.entryTracker?.clearArchiveEntries();
+		this.clipboardDialog?.replaceArchiveEntries([], (entry) => this.entryTracker?.isHot(entry) ?? false);
+		this.clipboardDialog?.setArchiveSearching(false);
+
+		const hasArchiveQuery = query.query.length > 0 || query.pinned || query.tag !== null || query.type !== null;
+		if (!hasArchiveQuery || hasHotMatches) return;
+		this.clipboardDialog?.setArchiveSearching(true);
+
+		this.archiveSearchTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 150, () => {
+			this.archiveSearchTimeoutId = -1;
+			this.searchArchive(query, serial).catch((error) => this.logger.error('Archive search failed', error));
+			return GLib.SOURCE_REMOVE;
+		});
+	}
+
+	private async searchArchive(query: SearchQuery, serial: number): Promise<void> {
+		const tracker = this.entryTracker;
+		if (!tracker) return;
+
+		const search: DatabaseSearch = {
+			query: query.query,
+			pinned: query.pinned,
+			excludePinned: query.excludePinned,
+			tag: query.tag,
+			excludeTagged: query.excludeTagged,
+			type: query.type,
+		};
+		try {
+			const result = await tracker.searchArchive(search);
+			if (serial !== this.archiveSearchSerial || tracker !== this.entryTracker) return;
+
+			const entries = tracker.replaceArchiveEntries(result);
+			this.clipboardDialog?.replaceArchiveEntries(entries, (entry) => tracker.isHot(entry));
+		} finally {
+			if (serial === this.archiveSearchSerial) this.clipboardDialog?.setArchiveSearching(false);
+		}
 	}
 
 	private async initHljs() {
@@ -268,6 +318,9 @@ export default class CopyousExtension extends Extension {
 
 	private async initEntryTracker() {
 		if (!this.entryTracker || !this.entryTracker.shouldInit) return;
+		this.archiveSearchSerial++;
+		if (this.archiveSearchTimeoutId >= 0) GLib.source_remove(this.archiveSearchTimeoutId);
+		this.archiveSearchTimeoutId = -1;
 		const serial = ++this.entryTrackerInitSerial;
 		const hydration = beginTiming((message) => this.logger?.log(message), 'storage.hydration', {
 			serial,
@@ -280,6 +333,7 @@ export default class CopyousExtension extends Extension {
 			hydration.finish({ entries: entries.length, stale: serial !== this.entryTrackerInitSerial });
 			if (serial !== this.entryTrackerInitSerial || !this.entryTracker || !this.clipboardDialog) return;
 			this.clipboardDialog.loadEntries(entries, (entry) => this.entryTracker?.isTracked(entry) ?? false);
+			this.scheduleArchiveSearch(this.clipboardDialog.searchQuery, this.clipboardDialog.hasHotMatches());
 		} catch (error) {
 			hydration.cancel({ error: true });
 			if (serial === this.entryTrackerInitSerial) this.clipboardDialog?.setLoading(false);
@@ -353,6 +407,9 @@ export default class CopyousExtension extends Extension {
 
 		if (this.historyTimeoutId >= 0) GLib.source_remove(this.historyTimeoutId);
 		this.historyTimeoutId = -1;
+		if (this.archiveSearchTimeoutId >= 0) GLib.source_remove(this.archiveSearchTimeoutId);
+		this.archiveSearchTimeoutId = -1;
+		this.archiveSearchSerial++;
 
 		// Clipboard Manager
 		this.clipboardManager?.disconnectObject(this);

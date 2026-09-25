@@ -20,6 +20,7 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 	private _lastFocus: Clutter.Actor | null = null;
 	private _lastQuery: SearchQuery | null = null;
 	private _loading = false;
+	private _searchActive = false;
 
 	constructor(ext: CopyousExtension) {
 		super({
@@ -45,7 +46,11 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 			if (this._statusItem.get_parent() === null) this.add_child(this._statusItem);
 			this.x_align = Clutter.ActorAlign.CENTER;
 			this.x_expand = true;
-			this._statusItem.state = this._loading ? State.Loading : hasItems ? State.NoResults : State.Empty;
+			this._statusItem.state = this._loading
+				? State.Loading
+				: this._searchActive || hasItems
+					? State.NoResults
+					: State.Empty;
 		} else {
 			if (this._statusItem.get_parent() !== null) this.remove_child(this._statusItem);
 			this.x_align = Clutter.ActorAlign.START;
@@ -180,6 +185,12 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 	public setLoading(loading: boolean): void {
 		if (this._loading === loading) return;
 		this._loading = loading;
+		this.updateVisible();
+	}
+
+	public setSearchActive(searchActive: boolean): void {
+		if (this._searchActive === searchActive) return;
+		this._searchActive = searchActive;
 		this.updateVisible();
 	}
 

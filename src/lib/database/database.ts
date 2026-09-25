@@ -106,6 +106,15 @@ export class ClipboardEntry extends GObject.Object {
 	}
 }
 
+export interface DatabaseSearch {
+	query: string;
+	pinned: boolean;
+	excludePinned: boolean;
+	tag: Tag | null;
+	excludeTagged: boolean;
+	type: ItemType | null;
+}
+
 /**
  * Clipboard database
  */
@@ -130,9 +139,16 @@ export interface Database {
 	flush(): Promise<void>;
 
 	/**
-	 * Gets the entries of the database.
+	 * Gets the newest entries of the database.
+	 * @param limit Maximum entries to materialize. Omit to return all entries.
 	 */
-	entries(): Promise<ClipboardEntry[]>;
+	entries(limit?: number): Promise<ClipboardEntry[]>;
+
+	/** Gets one persistent entry by storage id. */
+	get(id: number): Promise<ClipboardEntry | null>;
+
+	/** Searches persistent history without hydrating the whole archive. */
+	search(search: DatabaseSearch, limit: number): Promise<ClipboardEntry[]>;
 
 	/**
 	 * Select a conflicting entry by its type and content.

@@ -129,8 +129,8 @@
 		</key>
 		<key name="history-length" type="i">
 			<default>50</default>
-			<range min="10" max="500"/>
-			<summary>Number of unpinned and untagged items to keep in the clipboard history</summary>
+			<range min="10" max="1000000"/>
+			<summary>Maximum number of unpinned and untagged items to keep in the clipboard archive</summary>
 		</key>
 		<key name="history-time" type="i">
 			<default>0</default>

@@ -260,6 +260,7 @@ class ClipboardDialogFooter extends St.BoxLayout {
 		'copy': { param_types: [GObject.TYPE_JSOBJECT] },
 		'paste': { param_types: [GObject.TYPE_JSOBJECT] },
 		'clear-history': { param_types: [GObject.TYPE_INT] },
+		'search-history': { param_types: [SearchQuery.$gtype, GObject.TYPE_BOOLEAN] },
 	},
 })
 export class ClipboardDialog extends St.Widget {
@@ -270,6 +271,7 @@ export class ClipboardDialog extends St.Widget {
 	private _nextCursor: [number, number] | null = null;
 	private _cursor: [number, number] | null = null;
 	private _entries: ClipboardEntry[] = [];
+	private readonly _archiveEntries = new Set<ClipboardEntry>();
 	private _filteredEntries: ClipboardEntry[] = [];
 	private _isTracked: ((entry: ClipboardEntry) => boolean) | null = null;
 	private _query: SearchQuery | null = null;
@@ -570,7 +572,10 @@ export class ClipboardDialog extends St.Widget {
 	}
 
 	public addEntry(entry: ClipboardEntry): void {
-		if (this._entries.includes(entry)) return;
+		if (this._entries.includes(entry)) {
+			this._archiveEntries.delete(entry);
+			return;
+		}
 
 		this._entries.push(entry);
 		this._entries.sort(compareEntries);
@@ -592,6 +597,7 @@ export class ClipboardDialog extends St.Widget {
 		this.disconnectEntries();
 		this.clearDetachedWarmItems();
 		this._isTracked = isTracked;
+		this._archiveEntries.clear();
 		this._entries = entries.filter(isTracked).sort(compareEntries);
 		for (const entry of this._entries) this.connectEntry(entry);
 
@@ -600,8 +606,46 @@ export class ClipboardDialog extends St.Widget {
 		this.refreshWindow(this.opened, 'initial');
 	}
 
+	public replaceArchiveEntries(
+		entries: readonly ClipboardEntry[],
+		isHot: (entry: ClipboardEntry) => boolean = () => false,
+	): void {
+		for (const entry of this._archiveEntries) {
+			if (isHot(entry)) continue;
+			entry.disconnectObject(this);
+			const index = this._entries.indexOf(entry);
+			if (index >= 0) this._entries.splice(index, 1);
+		}
+		this._archiveEntries.clear();
+
+		for (const entry of entries) {
+			if (this._entries.includes(entry)) continue;
+			this._entries.push(entry);
+			this._archiveEntries.add(entry);
+			this.connectEntry(entry);
+		}
+		this._entries.sort(compareEntries);
+		this._renderedCount = HOT_WINDOW_ITEMS;
+		this.refreshWindow(this.opened, 'archive-search');
+	}
+
 	public setLoading(loading: boolean): void {
 		this._scrollView.setLoading(loading);
+	}
+
+	public setArchiveSearching(searching: boolean): void {
+		this._scrollView.setLoading(searching);
+	}
+
+	public get searchQuery(): SearchQuery {
+		return this._query ?? this._header.searchEntry.searchQuery.withChange(SearchChange.Different);
+	}
+
+	public hasHotMatches(): boolean {
+		return this._entries.some(
+			(entry) =>
+				!this._archiveEntries.has(entry) && (this._isTracked?.(entry) ?? true) && this.matchesQuery(entry),
+		);
 	}
 
 	private cancelScheduledWork(): void {
@@ -653,6 +697,7 @@ export class ClipboardDialog extends St.Widget {
 	private disconnectEntries(): void {
 		for (const entry of this._entries) entry.disconnectObject(this);
 		this._entries = [];
+		this._archiveEntries.clear();
 		this._filteredEntries = [];
 	}
 
@@ -689,6 +734,20 @@ export class ClipboardDialog extends St.Widget {
 		this._query = query.withChange(SearchChange.Different);
 		this._renderedCount = HOT_WINDOW_ITEMS;
 		this.scheduleModelRefresh();
+		this.emit('search-history', this._query, this.hasHotMatches());
+	}
+
+	private hasActiveSearch(): boolean {
+		const query = this._query;
+		return !!(
+			query &&
+			(query.query.length > 0 ||
+				query.pinned ||
+				query.excludePinned ||
+				query.tag !== null ||
+				query.excludeTagged ||
+				query.type !== null)
+		);
 	}
 
 	private scheduleModelRefresh(): void {
@@ -749,6 +808,8 @@ export class ClipboardDialog extends St.Widget {
 		}
 
 		this._scrollView.syncItems(items);
+		this._scrollView.setSearchActive(this.hasActiveSearch());
+		this._scrollView.setHasMore(this._renderedCount < this._filteredEntries.length);
 		if (warmNewPreviews) this.queuePreviews(created);
 		timing.finish({ created: created.length, retained: items.length - created.length, total: items.length });
 	}
@@ -768,6 +829,7 @@ export class ClipboardDialog extends St.Widget {
 			this._openToIdleTiming?.finish({ phase: 'post-map' });
 			this._openToIdleTiming = undefined;
 			this.queuePreviews(this._scrollView.getItems());
+			this._scrollView.loadMoreIfNeeded();
 			return GLib.SOURCE_REMOVE;
 		});
 	}

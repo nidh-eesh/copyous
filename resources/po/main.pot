@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Copyous\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-09 16:27+0000\n"
+"POT-Creation-Date: 2026-09-25 22:21+0530\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -67,21 +67,29 @@ msgstr ""
 msgid "QR Code"
 msgstr ""
 
-#: src/lib/database/entryTracker.ts:133 src/lib/database/entryTracker.ts:148
+#: src/lib/database/entryTracker.ts:233 src/lib/database/entryTracker.ts:257
 msgid "Failed to load Gda"
 msgstr ""
 
-#: src/lib/database/entryTracker.ts:134 src/lib/database/entryTracker.ts:148
-#: src/lib/database/entryTracker.ts:164
+#: src/lib/database/entryTracker.ts:234 src/lib/database/entryTracker.ts:257
+#: src/lib/database/entryTracker.ts:286
 msgid "Clipboard history will be disabled"
 msgstr ""
 
-#: src/lib/database/entryTracker.ts:135
+#: src/lib/database/entryTracker.ts:235
 msgid "Disable Warning"
 msgstr ""
 
-#: src/lib/database/entryTracker.ts:164
+#: src/lib/database/entryTracker.ts:286
 msgid "Failed to load JSON"
+msgstr ""
+
+#: src/lib/database/entryTracker.ts:651
+msgid "Failed to save clipboard history"
+msgstr ""
+
+#: src/lib/database/entryTracker.ts:652
+msgid "Copyous will keep the history in memory and retry in the background"
 msgstr ""
 
 #: src/lib/misc/notifications.ts:63 src/lib/misc/notifications.ts:114
@@ -140,14 +148,14 @@ msgstr ""
 #: src/lib/preferences/actions/actionDialog.ts:175
 #: src/lib/preferences/actions/actionDialog.ts:364
 #: src/lib/preferences/customization/items/fileItemCustomization.ts:69
-#: src/lib/ui/items/textItem.ts:24
+#: src/lib/ui/items/textItem.ts:25
 msgid "Text"
 msgstr ""
 
 #: src/lib/preferences/actions/actionDefaults.ts:136
 #: src/lib/preferences/actions/actionDialog.ts:176
 #: src/lib/preferences/actions/actionDialog.ts:367
-#: src/lib/ui/items/codeItem.ts:23
+#: src/lib/ui/items/codeItem.ts:24
 msgid "Code"
 msgstr ""
 
@@ -155,14 +163,14 @@ msgstr ""
 #: src/lib/preferences/actions/actionDialog.ts:177
 #: src/lib/preferences/actions/actionDialog.ts:370
 #: src/lib/preferences/customization/items/fileItemCustomization.ts:79
-#: src/lib/ui/items/imageItem.ts:38
+#: src/lib/ui/items/imageItem.ts:40
 msgid "Image"
 msgstr ""
 
 #: src/lib/preferences/actions/actionDefaults.ts:144
 #: src/lib/preferences/actions/actionDialog.ts:178
 #: src/lib/preferences/actions/actionDialog.ts:373
-#: src/lib/ui/items/fileItem.ts:52
+#: src/lib/ui/items/fileItem.ts:54
 msgid "File"
 msgstr ""
 
@@ -177,7 +185,7 @@ msgstr ""
 #: src/lib/preferences/actions/actionDialog.ts:180
 #: src/lib/preferences/actions/actionDialog.ts:379
 #: src/lib/preferences/customization/items/linkItemCustomization.ts:45
-#: src/lib/ui/items/linkItem.ts:303
+#: src/lib/ui/items/linkItem.ts:309
 msgid "Link"
 msgstr ""
 
@@ -1456,7 +1464,7 @@ msgid ""
 msgstr ""
 
 #: src/lib/preferences/general/historySettings.ts:137
-#: src/lib/ui/clipboardDialog.ts:130 src/lib/ui/clipboardDialog.ts:235
+#: src/lib/ui/clipboardDialog.ts:140 src/lib/ui/clipboardDialog.ts:245
 #: src/lib/ui/indicator.ts:54
 msgid "Clear"
 msgstr ""
@@ -1474,14 +1482,16 @@ msgid "History Length"
 msgstr ""
 
 #: src/lib/preferences/general/historySettings.ts:144
-msgid "Select how many items to keep in the clipboard history"
+msgid ""
+"Maximum number of unpinned and untagged items to keep in the clipboard "
+"archive"
 msgstr ""
 
-#: src/lib/preferences/general/historySettings.ts:150
+#: src/lib/preferences/general/historySettings.ts:156
 msgid "History Time Limit"
 msgstr ""
 
-#: src/lib/preferences/general/historySettings.ts:152
+#: src/lib/preferences/general/historySettings.ts:158
 msgid ""
 "Select how many minutes to keep items in the clipboard history. Set to 0 to "
 "disable the time limit"
@@ -1774,20 +1784,24 @@ msgid_plural "%d files"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/lib/ui/items/linkItem.ts:95
+#: src/lib/ui/items/linkItem.ts:96
 msgid "No Title"
 msgstr ""
 
-#: src/lib/ui/items/linkItem.ts:97
+#: src/lib/ui/items/linkItem.ts:98
 msgid "No Description"
 msgstr ""
 
-#: src/lib/ui/items/statusItem.ts:70 src/lib/ui/items/statusItem.ts:104
+#: src/lib/ui/items/statusItem.ts:71 src/lib/ui/items/statusItem.ts:105
 msgid "Clipboard is Empty"
 msgstr ""
 
-#: src/lib/ui/items/statusItem.ts:107
+#: src/lib/ui/items/statusItem.ts:108
 msgid "No Items Found"
+msgstr ""
+
+#: src/lib/ui/items/statusItem.ts:111
+msgid "Loading Clipboard…"
 msgstr ""
 
 #: src/lib/ui/searchEntry.ts:151

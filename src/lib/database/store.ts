@@ -25,7 +25,7 @@ export class ClipboardStore {
 	private readonly _byKey = new Map<string, ClipboardEntry>();
 	private readonly _keysById = new Map<number, string>();
 	private _ordered: ClipboardEntry[] = [];
-	private _nextId: number = 0;
+	private _nextTemporaryId: number = 2147483647;
 
 	constructor(private readonly timingSink?: (message: string) => void) {}
 
@@ -43,7 +43,7 @@ export class ClipboardStore {
 		this._byKey.clear();
 		this._keysById.clear();
 		this._ordered = [];
-		this._nextId = 0;
+		this._nextTemporaryId = 2147483647;
 	}
 
 	public snapshot(): ClipboardEntry[] {
@@ -69,7 +69,7 @@ export class ClipboardStore {
 		if (this.findConflict(type, content)) return null;
 
 		const entry = new ClipboardEntry(
-			this._nextId++,
+			this._nextTemporaryId--,
 			type,
 			content,
 			false,
@@ -77,6 +77,16 @@ export class ClipboardStore {
 			GLib.DateTime.new_now_utc(),
 			metadata,
 		);
+		this.add(entry);
+		this.reorder(entry);
+		return entry;
+	}
+
+	/** Adds a storage-backed entry to the bounded working set. */
+	public adopt(entry: ClipboardEntry): ClipboardEntry {
+		const existing = this._byId.get(entry.id) ?? this._byKey.get(entryKey(entry));
+		if (existing) return existing;
+
 		this.add(entry);
 		this.reorder(entry);
 		return entry;
@@ -169,6 +179,5 @@ export class ClipboardStore {
 		this._byKey.set(key, entry);
 		this._keysById.set(entry.id, key);
 		this._ordered.push(entry);
-		this._nextId = Math.max(this._nextId, entry.id + 1);
 	}
 }

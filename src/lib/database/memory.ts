@@ -3,7 +3,7 @@ import GObject from 'gi://GObject';
 
 import { ItemType } from '../common/constants.js';
 import { ClipboardHistory } from '../common/settings.js';
-import { ClipboardEntry, Database, Metadata } from './database.js';
+import { ClipboardEntry, Database, DatabaseSearch, Metadata } from './database.js';
 
 /**
  * In memory database
@@ -50,9 +50,39 @@ export class MemoryDatabase implements Database {
 		return Promise.resolve();
 	}
 
-	public entries(): Promise<ClipboardEntry[]> {
+	public entries(limit?: number): Promise<ClipboardEntry[]> {
 		const entries = Array.from(this._entries.values()).sort((a, b) => b.datetime.compare(a.datetime));
-		return Promise.resolve(entries);
+		return Promise.resolve(limit === undefined ? entries : entries.slice(0, limit));
+	}
+
+	public get(id: number): Promise<ClipboardEntry | null> {
+		const key = this._keys.get(id);
+		return Promise.resolve(key === undefined ? null : (this._entries.get(key) ?? null));
+	}
+
+	public async search(search: DatabaseSearch, limit: number): Promise<ClipboardEntry[]> {
+		const query = search.query.toLocaleLowerCase();
+		const entries = await this.entries();
+		return entries
+			.filter((entry) => {
+				if (search.pinned ? !entry.pinned : search.excludePinned && entry.pinned) return false;
+				if (search.tag !== null ? entry.tag !== search.tag : search.excludeTagged && entry.tag !== null)
+					return false;
+				if (search.type !== null && entry.type !== search.type) return false;
+				if (query.length === 0) return true;
+
+				const text = [entry.content, entry.title];
+				if (entry.metadata) text.push(JSON.stringify(entry.metadata));
+				if (entry.type === ItemType.File || entry.type === ItemType.Files) {
+					try {
+						text.push(decodeURI(entry.content).replaceAll('file://', ''));
+					} catch {
+						// Keep the encoded URI as a search candidate.
+					}
+				}
+				return text.some((value) => value.toLocaleLowerCase().includes(query));
+			})
+			.slice(0, limit);
 	}
 
 	public selectConflict(entry: ClipboardEntry | { type: ItemType; content: string }): Promise<number | null> {
@@ -85,20 +115,22 @@ export class MemoryDatabase implements Database {
 		entry: ClipboardEntry,
 		property: Exclude<keyof ClipboardEntry, keyof GObject.Object>,
 	): Promise<number> {
-		if (property !== 'content') return Promise.resolve(-1);
+		const previousKey = this._keys.get(entry.id);
+		if (previousKey === undefined) return Promise.resolve(-1);
 
-		const key = this.entryToKey(entry);
-		const existingEntry = this._entries.get(key);
-		if (existingEntry) {
-			return Promise.resolve(existingEntry.id);
+		if (property === 'type' || property === 'content') {
+			const nextKey = this.entryToKey(entry);
+			const conflict = this._entries.get(nextKey);
+			if (conflict && conflict.id !== entry.id) return Promise.resolve(conflict.id);
+
+			if (previousKey !== nextKey) this._entries.delete(previousKey);
+			this._entries.set(nextKey, entry);
+			this._keys.set(entry.id, nextKey);
 		} else {
-			const prevKey = this._keys.get(entry.id);
-			if (prevKey) this._entries.delete(prevKey);
-
-			this._entries.set(key, entry);
-			this._keys.set(entry.id, key);
-			return Promise.resolve(-1);
+			this._entries.set(previousKey, entry);
 		}
+
+		return Promise.resolve(-1);
 	}
 
 	public delete(entry: ClipboardEntry): Promise<boolean> {
