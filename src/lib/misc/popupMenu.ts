@@ -1,9 +1,9 @@
-import Config from 'resource:///org/gnome/shell/misc/config.js';
+import { VERSION } from './compatibility.js';
 
 type PopupMethod = (parameters?: number | { animate: boolean; fadeOnly?: boolean }) => void;
 
 function isGnome51OrLater(): boolean {
-	return Number.parseInt(Config.PACKAGE_VERSION.split('.')[0] ?? '0', 10) >= 51;
+	return VERSION >= 51;
 }
 
 function animate(menu: unknown, method: 'open' | 'close', animation: number): void {
