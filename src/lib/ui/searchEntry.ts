@@ -13,6 +13,7 @@ import { ItemType, ItemTypes, Tag, Tags } from '../common/constants.js';
 import { enumParamSpec, registerClass } from '../common/gjs.js';
 import { Icon, loadIcon } from '../common/icons.js';
 import { ClipboardEntry } from '../database/database.js';
+import { closePopupMenu } from '../misc/popupMenu.js';
 import { TagsItem } from './components/tagsItem.js';
 
 const SearchCollator = new Intl.Collator(undefined, { sensitivity: 'base' });
@@ -142,7 +143,7 @@ class ItemPopupMenu extends PopupMenu.PopupMenu<ItemPopupMenuSignals> {
 		// Tags
 		this._tagsItem = new TagsItem();
 		this._tagsItem.connect('tag-changed', () => {
-			this.close(BoxPointer.PopupAnimation.FADE);
+			closePopupMenu(this, BoxPointer.PopupAnimation.FADE);
 			this.emit('tag-changed', this._tagsItem.tag);
 		});
 		this.addMenuItem(this._tagsItem);
@@ -175,7 +176,7 @@ class ItemPopupMenu extends PopupMenu.PopupMenu<ItemPopupMenuSignals> {
 				// Select tag with number
 				if (key === Clutter.KEY_0 || key === Clutter.KEY_KP_0) {
 					this._tagsItem.tag = null;
-					this.close(BoxPointer.PopupAnimation.FADE);
+					closePopupMenu(this, BoxPointer.PopupAnimation.FADE);
 					this.emit('tag-changed', null);
 					return;
 				}
@@ -186,7 +187,7 @@ class ItemPopupMenu extends PopupMenu.PopupMenu<ItemPopupMenuSignals> {
 					let tag = Tags[i] ?? null;
 					tag = this._tagsItem.tag === tag ? null : tag;
 					this._tagsItem.tag = tag;
-					this.close(BoxPointer.PopupAnimation.FADE);
+					closePopupMenu(this, BoxPointer.PopupAnimation.FADE);
 					this.emit('tag-changed', tag);
 					return;
 				}

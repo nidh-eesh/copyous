@@ -10,6 +10,7 @@ import type CopyousExtension from '../../../extension.js';
 import { ItemType, Tags } from '../../common/constants.js';
 import { registerClass } from '../../common/gjs.js';
 import { ClipboardEntry } from '../../database/database.js';
+import { closePopupMenu } from '../../misc/popupMenu.js';
 import { Shortcut } from '../../misc/shortcuts.js';
 import { ActionPopupMenuSection, ActionPopupMenuSectionSignals } from './actionMenu.js';
 import { EditDialog } from './editDialog.js';
@@ -78,7 +79,7 @@ export class ClipboardItemMenu extends PopupMenu.PopupMenu<ActionPopupMenuSectio
 		this._tagsItem = new TagsItem();
 		this.addMenuItem(this._tagsItem);
 
-		this._tagsItem.connect('tag-changed', () => this.close(BoxPointer.PopupAnimation.FADE));
+		this._tagsItem.connect('tag-changed', () => closePopupMenu(this, BoxPointer.PopupAnimation.FADE));
 		this._tagsItem.connect('notify::tag', () => {
 			if (this._entry) {
 				this._entry.tag = this._tagsItem.tag;
@@ -122,7 +123,7 @@ export class ClipboardItemMenu extends PopupMenu.PopupMenu<ActionPopupMenuSectio
 				// Select tag with number
 				if (key === Clutter.KEY_0) {
 					this._tagsItem.tag = null;
-					this.close(BoxPointer.PopupAnimation.FADE);
+					closePopupMenu(this, BoxPointer.PopupAnimation.FADE);
 					return;
 				}
 
@@ -130,7 +131,7 @@ export class ClipboardItemMenu extends PopupMenu.PopupMenu<ActionPopupMenuSectio
 					let tag = Tags[key - Clutter.KEY_1] ?? null;
 					tag = this._tagsItem.tag === tag ? null : tag;
 					this._tagsItem.tag = tag;
-					this.close(BoxPointer.PopupAnimation.FADE);
+					closePopupMenu(this, BoxPointer.PopupAnimation.FADE);
 					return;
 				}
 
@@ -138,7 +139,7 @@ export class ClipboardItemMenu extends PopupMenu.PopupMenu<ActionPopupMenuSectio
 				const action = ext.shortcutsManager?.getShortcutForKeyBinding(key, event.get_state());
 
 				if (action === Shortcut.Menu) {
-					this.close(BoxPointer.PopupAnimation.FADE);
+					closePopupMenu(this, BoxPointer.PopupAnimation.FADE);
 				}
 			}
 		});

@@ -16,6 +16,7 @@ import { ItemType } from '../../common/constants.js';
 import { registerClass } from '../../common/gjs.js';
 import { Icon, loadIcon } from '../../common/icons.js';
 import { ClipboardEntry, CodeMetadata, Language } from '../../database/database.js';
+import { openPopupMenu } from '../../misc/popupMenu.js';
 
 /** Entry with proper height for multiline text and event forwarding */
 @registerClass()
@@ -245,7 +246,7 @@ export class LanguageButton extends St.Button {
 	}
 
 	override vfunc_clicked(_clicked_button: number) {
-		this._popupMenu.open(BoxPointer.PopupAnimation.FULL);
+		openPopupMenu(this._popupMenu, BoxPointer.PopupAnimation.FULL);
 	}
 
 	override destroy() {

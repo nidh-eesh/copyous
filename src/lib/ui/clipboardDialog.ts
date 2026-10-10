@@ -22,6 +22,7 @@ import { OpenClipboardDialogBehavior } from '../common/settings.js';
 import { beginTiming } from '../common/timing.js';
 import { ClipboardEntry } from '../database/database.js';
 import { VERSION } from '../misc/compatibility.js';
+import { openPopupMenu } from '../misc/popupMenu.js';
 import { ClipboardScrollView } from './clipboardScrollView.js';
 import { ClipboardItemMenu } from './components/clipboardItemMenu.js';
 import { ConfirmClearHistoryDialog } from './indicator.js';
@@ -934,7 +935,7 @@ export class ClipboardDialog extends St.Widget {
 
 				Main.layoutManager.setDummyCursorGeometry(x, y, w, h);
 				this._clipboardItemMenu.entry = entry;
-				this._clipboardItemMenu.open(BoxPointer.PopupAnimation.SLIDE);
+				openPopupMenu(this._clipboardItemMenu, BoxPointer.PopupAnimation.SLIDE);
 			},
 			this,
 		);
