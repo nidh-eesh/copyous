@@ -298,7 +298,11 @@ export class ClipboardScrollView extends St.ScrollView {
 		this._loadMoreIdleId = 0;
 		this._loadMoreCallback = null;
 		this._hasMore = false;
+		this.hadjustment.disconnectObject(this);
+		this.vadjustment.disconnectObject(this);
 		this.ext.settings.disconnectObject(this);
+		this.clearItems();
+		this._scrollContainer.destroy();
 
 		super.destroy();
 	}

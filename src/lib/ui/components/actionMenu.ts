@@ -121,6 +121,8 @@ export class ActionPopupMenuSection extends PopupMenu.PopupMenuSection<ActionPop
 
 	private _monitor: Gio.FileMonitor;
 	private _tokens: Gio.Cancellable[] = [];
+	private _destroyed = false;
+	private _actionsSerial = 0;
 
 	constructor(private ext: CopyousExtension) {
 		super();
@@ -143,7 +145,11 @@ export class ActionPopupMenuSection extends PopupMenu.PopupMenuSection<ActionPop
 	}
 
 	private async updateActions(save: boolean = false) {
-		this._config = await loadConfig(this.ext, save);
+		if (this._destroyed) return;
+		const serial = ++this._actionsSerial;
+		const config = await loadConfig(this.ext, save);
+		if (this._destroyed || serial !== this._actionsSerial) return;
+		this._config = config;
 
 		this._menuActions.forEach((a) => a.destroy());
 		this._menuActions = this._config.actions
@@ -266,6 +272,8 @@ export class ActionPopupMenuSection extends PopupMenu.PopupMenuSection<ActionPop
 	}
 
 	override destroy(): void {
+		this._destroyed = true;
+		this._actionsSerial++;
 		this._tokens.forEach((t) => t.cancel());
 		this._monitor.cancel();
 		super.destroy();

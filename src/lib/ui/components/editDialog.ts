@@ -323,4 +323,9 @@ export class EditDialog extends ModalDialog.ModalDialog {
 	on_opened() {
 		this._entry.clutterText.queue_relayout();
 	}
+
+	override destroy() {
+		this._languageButton?.destroy();
+		super.destroy();
+	}
 }

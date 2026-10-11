@@ -3,6 +3,8 @@ import type GObject from 'gi://GObject';
 import type Gda from 'gi://Gda';
 import Gio from 'gi://Gio';
 
+import { gettext as _ } from 'resource:///org/gnome/shell/extensions/extension.js';
+
 import type CopyousExtension from '../../extension.js';
 import { ItemType, getDefaultDatabaseFile } from '../common/constants.js';
 import { ClipboardHistory, DatabaseBackend } from '../common/settings.js';

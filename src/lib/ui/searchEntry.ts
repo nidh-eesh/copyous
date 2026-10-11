@@ -13,6 +13,7 @@ import { ItemType, ItemTypes, Tag, Tags } from '../common/constants.js';
 import { enumParamSpec, registerClass } from '../common/gjs.js';
 import { Icon, loadIcon } from '../common/icons.js';
 import { ClipboardEntry } from '../database/database.js';
+import { ButtonMask } from '../misc/compatibility.js';
 import { closePopupMenu } from '../misc/popupMenu.js';
 import { TagsItem } from './components/tagsItem.js';
 
@@ -260,6 +261,7 @@ class ItemPopupMenu extends PopupMenu.PopupMenu<ItemPopupMenuSignals> {
 	},
 })
 export class SearchEntry extends St.Entry {
+	private _destroyed = false;
 	private _prevSearch: SearchQuery | null = null;
 	private _pinned: boolean = false;
 	private _tag: Tag | null = null;
@@ -297,7 +299,7 @@ export class SearchEntry extends St.Entry {
 
 		this._itemButton = new St.Button({
 			style_class: 'search-entry-button item-button',
-			button_mask: St.ButtonMask.ONE | St.ButtonMask.TWO,
+			button_mask: ButtonMask.Primary | ButtonMask.Middle,
 		});
 		left.add_child(this._itemButton);
 
@@ -482,6 +484,7 @@ export class SearchEntry extends St.Entry {
 	}
 
 	private search() {
+		if (this._destroyed) return;
 		this._prevSearch = this.searchQuery;
 		this.emit('search', this._prevSearch);
 	}
@@ -598,6 +601,7 @@ export class SearchEntry extends St.Entry {
 
 	override vfunc_unmap(): void {
 		super.vfunc_unmap();
+		if (this._destroyed) return;
 
 		if (!this.ext.settings.get_boolean('remember-search')) {
 			this.text = '';
@@ -608,6 +612,7 @@ export class SearchEntry extends St.Entry {
 	}
 
 	override destroy() {
+		this._destroyed = true;
 		this.ext.settings.disconnectObject(this);
 		this._menu.destroy();
 

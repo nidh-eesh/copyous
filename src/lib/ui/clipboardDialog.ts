@@ -268,6 +268,7 @@ export class ClipboardDialog extends St.Widget {
 	private _grab: Clutter.Grab | null = null;
 	private _open: boolean = false;
 	private _closing: boolean = false;
+	private _destroyed = false;
 	private _updateCursor: boolean = true;
 	private _nextCursor: [number, number] | null = null;
 	private _cursor: [number, number] | null = null;
@@ -425,13 +426,26 @@ export class ClipboardDialog extends St.Widget {
 	}
 
 	override destroy() {
+		this._destroyed = true;
 		this.cancelScheduledWork();
 		this.disconnectEntries();
 		this.clearDetachedWarmItems();
 		this.cancelOpenTimings('destroyed');
+		this._dialog.remove_all_transitions();
+		if (this._grab) {
+			Main.popModal(this._grab);
+			this._grab = null;
+			global.compositor.enable_unredirect();
+		}
+		this._open = false;
+		this._closing = false;
 		(Main.inputMethod as Clutter.InputMethod).disconnectObject(this);
 		this._ibusManager.disconnectObject(this);
 		this.ext.settings.disconnectObject(this);
+		this._clipboardItemMenu.destroy();
+		this._scrollView.destroy();
+		this._header.searchEntry.destroy();
+		this._header.destroy();
 
 		super.destroy();
 	}
@@ -732,6 +746,7 @@ export class ClipboardDialog extends St.Widget {
 	}
 
 	private search(query: SearchQuery): void {
+		if (this._destroyed) return;
 		this._query = query.withChange(SearchChange.Different);
 		this._renderedCount = HOT_WINDOW_ITEMS;
 		this.scheduleModelRefresh();
@@ -752,7 +767,7 @@ export class ClipboardDialog extends St.Widget {
 	}
 
 	private scheduleModelRefresh(): void {
-		if (this._modelRefreshId !== 0) return;
+		if (this._destroyed || this._modelRefreshId !== 0) return;
 		this._modelRefreshId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
 			this._modelRefreshId = 0;
 			this.refreshWindow(this.opened, 'model-change');
@@ -783,6 +798,7 @@ export class ClipboardDialog extends St.Widget {
 	}
 
 	private refreshWindow(warmNewPreviews: boolean, phase: string = 'refresh'): void {
+		if (this._destroyed) return;
 		const timing = beginTiming((message) => this.ext.logger?.log(message), 'ui.visible-actors', { phase });
 		this._filteredEntries = this._entries.filter(
 			(entry) => (this._isTracked?.(entry) ?? true) && this.matchesQuery(entry),
@@ -823,7 +839,7 @@ export class ClipboardDialog extends St.Widget {
 	}
 
 	private scheduleAfterOpen(): void {
-		if (this._afterOpenIdleId !== 0) return;
+		if (this._destroyed || this._afterOpenIdleId !== 0) return;
 
 		this._afterOpenIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
 			this._afterOpenIdleId = 0;
@@ -836,6 +852,7 @@ export class ClipboardDialog extends St.Widget {
 	}
 
 	private queuePreviews(items: readonly ClipboardItem[]): void {
+		if (this._destroyed) return;
 		for (const item of items) {
 			if (this._queuedPreviews.has(item)) continue;
 			this._queuedPreviews.add(item);
@@ -912,6 +929,12 @@ export class ClipboardDialog extends St.Widget {
 		}
 
 		// Connect edit
+		item.connect('destroy', () => {
+			this._queuedPreviews.delete(item);
+			const index = this._previewQueue.indexOf(item);
+			if (index >= 0) this._previewQueue.splice(index, 1);
+			if (this._detachedWarmItems.get(entry) === item) this._detachedWarmItems.delete(entry);
+		});
 		item.connectObject('edit', () => this._clipboardItemMenu.edit(entry), this);
 
 		// Connect item menu

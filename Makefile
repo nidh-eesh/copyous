@@ -34,7 +34,7 @@ endif
 .PHONY: all clean
 .PHONY: database
 .PHONY: lint
-.PHONY: test benchmark
+.PHONY: test test-shell benchmark
 .PHONY: pot po check-pot check-po
 .PHONY: build install uninstall
 .PHONY: launch launch-profile launch-settings
@@ -71,6 +71,9 @@ lint-fix:
 test: $(DIST_ZIP)
 	pnpm tsx scripts/tests/memory-first-store.test.ts
 	gjs -m scripts/tests/archive-database.test.mjs
+
+test-shell: $(DIST_ZIP)
+	python scripts/tests/gnome-shell-smoke.py
 
 benchmark:
 	pnpm tsx scripts/tests/memory-first-store.bench.ts

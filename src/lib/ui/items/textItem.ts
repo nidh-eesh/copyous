@@ -42,7 +42,7 @@ export class TextItem extends ClipboardItem {
 		this.ext.settings.connectObject('changed::tab-width', this.updateText.bind(this), this._text);
 
 		entry.bind_property('content', this._text, 'label', GObject.BindingFlags.SYNC_CREATE);
-		entry.connectObject('notify::content', this.updateTextInfo.bind(this));
+		entry.connectObject('notify::content', this.updateTextInfo.bind(this), this);
 
 		this.updateText();
 		if (loadPreview) this.loadPreview();
