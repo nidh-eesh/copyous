@@ -27,6 +27,7 @@ export class ClipboardScrollView extends St.ScrollView {
 	private _loadMoreCallback: (() => void) | null = null;
 	private _loadMoreIdleId = 0;
 	private _hasMore = false;
+	private _loadMoreEnabled = false;
 
 	private readonly _scrollContainer: ClipboardScrollContainer;
 
@@ -132,6 +133,14 @@ export class ClipboardScrollView extends St.ScrollView {
 		this.maybeLoadMore();
 	}
 
+	public setLoadMoreEnabled(enabled: boolean): void {
+		this._loadMoreEnabled = enabled;
+		if (!enabled && this._loadMoreIdleId !== 0) {
+			GLib.source_remove(this._loadMoreIdleId);
+			this._loadMoreIdleId = 0;
+		}
+	}
+
 	public setLoadMoreCallback(callback: (() => void) | null) {
 		this._loadMoreCallback = callback;
 	}
@@ -142,6 +151,10 @@ export class ClipboardScrollView extends St.ScrollView {
 
 	public selectItem(index: number): boolean {
 		return this._scrollContainer.selectItem(index);
+	}
+
+	public focusInitialItem(): boolean {
+		return this._scrollContainer.focusInitialItem();
 	}
 
 	public selectNextItem() {
@@ -189,7 +202,7 @@ export class ClipboardScrollView extends St.ScrollView {
 	}
 
 	private requestMore(): void {
-		if (!this._loadMoreCallback || this._loadMoreIdleId !== 0) return;
+		if (!this._loadMoreEnabled || !this._loadMoreCallback || this._loadMoreIdleId !== 0) return;
 
 		this._loadMoreIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
 			this._loadMoreIdleId = 0;
@@ -199,13 +212,16 @@ export class ClipboardScrollView extends St.ScrollView {
 	}
 
 	private maybeLoadMore(): void {
-		if (!this._hasMore) return;
+		if (!this._loadMoreEnabled || !this.mapped || !this._hasMore) return;
 		const adjustment = this._orientation === Clutter.Orientation.HORIZONTAL ? this.hadjustment : this.vadjustment;
+		if (adjustment.page_size <= 0) return;
 		const scrollable = adjustment.upper - adjustment.page_size;
 		if (scrollable <= 0) {
 			this.requestMore();
 			return;
 		}
+		// A full viewport at the start does not need an extra page until the user scrolls.
+		if (adjustment.value <= 0) return;
 
 		const itemSize = this._orientation === Clutter.Orientation.HORIZONTAL ? this._itemWidth : this._itemHeight;
 		const threshold = Math.max(itemSize * 2, adjustment.page_size);

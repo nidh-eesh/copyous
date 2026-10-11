@@ -28,9 +28,14 @@ if '--default-renderer' in sys.argv:
     env.pop('LIBGL_ALWAYS_SOFTWARE', None)
 if '--mask-failure' in sys.argv:
     env['COPYOUS_TEST_MASK_FAILURE'] = '1'
+for argument in sys.argv[1:]:
+    if argument.startswith('--profile='):
+        env['COPYOUS_SHELL_PROFILE'] = argument.split('=', 1)[1]
 extension = root / 'data/gnome-shell/extensions' / UUID
 extension.mkdir(parents=True)
-with zipfile.ZipFile(REPO / 'dist' / f'{UUID}.zip') as package:
+package_path = next((Path(arg.split('=', 1)[1]) for arg in sys.argv if arg.startswith('--package=')),
+                    REPO / 'dist' / f'{UUID}.zip')
+with zipfile.ZipFile(package_path) as package:
     package.extractall(extension)
 bundle = """const {createRequire} = require('node:module');
 const esbuild = createRequire(require.resolve('tsx'))('esbuild');
@@ -39,7 +44,8 @@ esbuild.buildSync({entryPoints: [require.resolve('highlight.js/lib/common')],
 subprocess.run(['node', '-e', bundle, str(extension / 'highlight.min.js')], cwd=REPO, check=True)
 subprocess.run(['glib-compile-schemas', '--strict', str(extension / 'schemas')], check=True)
 command = ['dbus-run-session', '--', 'gnome-shell', '--headless', '--wayland',
-           '--virtual-monitor', '1600x900', '--no-x11', '--automation-script',
+           '--virtual-monitor', next((arg.split('=', 1)[1] for arg in sys.argv if arg.startswith('--monitor=')),
+                                     '1600x900'), '--no-x11', '--automation-script',
            str(REPO / 'scripts/tests/gnome-shell-smoke.mjs')]
 print(f'Isolated GNOME Shell artifacts: {root}', flush=True)
 process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -68,8 +74,13 @@ if '--mask-failure' in sys.argv:
         failures.append('Expected exactly one content mask fallback warning')
     failures = [line for line in failures if 'Copyous content mask is unavailable' not in line]
 if process.returncode != 0 or not report.get('passed') or failures:
-    print(f'FAIL isolated Shell: exit={process.returncode}, report={report}', flush=True)
+    print(f'FAIL isolated Shell: exit={process.returncode}, passed={report.get("passed")}', flush=True)
     print('\n'.join(failures[-20:]) or log[-6000:])
     sys.exit(1)
-print(json.dumps(report, indent=2), flush=True)
+if 'profile' in report:
+    print(json.dumps({'mode': report['profile']['mode'], 'cycles': [
+        {key: value for key, value in cycle.items() if key not in ['frames', 'creates', 'previews']}
+        for cycle in report['profile']['cycles']]}, indent=2), flush=True)
+else:
+    print(json.dumps(report, indent=2), flush=True)
 print('PASS isolated GNOME Shell native rendering and clipboard lifecycle', flush=True)

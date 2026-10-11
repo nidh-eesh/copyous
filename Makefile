@@ -70,6 +70,7 @@ lint-fix:
 
 test: $(DIST_ZIP)
 	pnpm tsx scripts/tests/memory-first-store.test.ts
+	pnpm tsx scripts/tests/preview-text.test.ts
 	gjs -m scripts/tests/archive-database.test.mjs
 
 test-shell: $(DIST_ZIP)

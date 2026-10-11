@@ -36,6 +36,7 @@ export class ClipboardItem extends St.Button {
 	private readonly _box: St.Widget;
 	private readonly _header: ClipboardItemHeader;
 	protected _content: St.BoxLayout;
+	private _holeEffect: Clutter.Effect | null = null;
 
 	constructor(
 		protected ext: CopyousExtension,
@@ -72,8 +73,6 @@ export class ClipboardItem extends St.Button {
 			y_expand: true,
 			clip_to_allocation: true,
 		});
-		const holeEffect = createHoleEffect(this._header.buttons);
-		if (holeEffect) this._content.add_effect(holeEffect);
 		this._box.add_child(this._content);
 
 		// Bind properties
@@ -180,6 +179,12 @@ export class ClipboardItem extends St.Button {
 
 	private updateHeader() {
 		const show = this.ext.settings.get_boolean('show-header');
+		// The mask is only needed when the controls overlap the content without a header.
+		if (!show && !this._holeEffect) {
+			this._holeEffect = createHoleEffect(this._header.buttons);
+			if (this._holeEffect) this._content.add_effect(this._holeEffect);
+		}
+		if (this._holeEffect) this._holeEffect.enabled = !show;
 		this._header.headerVisible = show;
 		this._header.showTitle = this.ext.settings.get_boolean('show-item-title');
 		this._header.controlsVisibility = this.ext.settings.get_enum('header-controls-visibility');

@@ -149,10 +149,20 @@ export async function run() {
 		pixbuf.fill(0xe66100ff);
 		pixbuf.savev(imagePath, 'png', [], []);
 		const fixtures = [
-			[ItemType.Text, 'VISIBLE TEXT CARD\nSecond line with Unicode: café 日本語', null],
+			[
+				ItemType.Text,
+				'VISIBLE TEXT CARD\nSecond line with Unicode: café 日本語' +
+					(GLib.getenv('COPYOUS_SHELL_PROFILE')?.includes('large')
+						? '\nLong clipboard text fixture'.repeat(30000)
+						: ''),
+				null,
+			],
 			[
 				ItemType.Code,
-				'const visible = 51;\nconsole.log(visible);',
+				'const visible = 51;\nconsole.log(visible);' +
+					(GLib.getenv('COPYOUS_SHELL_PROFILE')?.includes('large')
+						? '\nconsole.log("large code fixture");'.repeat(2200)
+						: ''),
 				{ language: { id: 'javascript', name: 'JavaScript' } },
 			],
 			[
@@ -179,6 +189,14 @@ export async function run() {
 		const query = (text = '', type = null) =>
 			new SearchQuery(SearchChange.Different, text, false, false, null, false, type);
 		dialog.search(query());
+		if (GLib.getenv('COPYOUS_SHELL_PROFILE')) {
+			const { profileOpen } = await import('./gnome-shell-profile.mjs');
+			report.profile = await profileOpen(extension);
+			await Main.extensionManager._callExtensionDisableWithRebase(UUID);
+			await Scripting.sleep(100);
+			report.passed = true;
+			return;
+		}
 		for (const orientation of [Clutter.Orientation.HORIZONTAL, Clutter.Orientation.VERTICAL]) {
 			extension.settings.set_enum('clipboard-orientation', orientation);
 			for (const header of [true, false]) {
@@ -197,6 +215,53 @@ export async function run() {
 		}
 		extension.settings.set_enum('clipboard-orientation', Clutter.Orientation.HORIZONTAL);
 		extension.settings.set_boolean('show-header', true);
+		for (const orientation of [Clutter.Orientation.HORIZONTAL, Clutter.Orientation.VERTICAL]) {
+			extension.settings.set_enum('clipboard-orientation', orientation);
+			dialog.search(query());
+			await Scripting.sleep(100);
+			dialog.open();
+			await Scripting.sleep(250);
+			const retained = dialog._scrollView.getItems();
+			assert(retained.length === 8, 'opening created an unnecessary page before scrolling');
+			assert(retained[0].has_key_focus(), 'opening did not focus the first card');
+			let unmapped = 0;
+			const connections = retained.map((actor) =>
+				actor.connect('notify::mapped', () => {
+					if (!actor.mapped) unmapped++;
+				}),
+			);
+			dialog._scrollView.syncItems([...retained].reverse());
+			assert(dialog._scrollView.getItems()[0] === retained.at(-1), 'retained cards failed to reorder');
+			dialog._scrollView.syncItems(retained);
+			assert(unmapped === 0, 'reconciling retained cards unnecessarily unmapped them');
+			retained.forEach((actor, index) => actor.disconnect(connections[index]));
+			const adjustment =
+				orientation === Clutter.Orientation.HORIZONTAL
+					? dialog._scrollView.hadjustment
+					: dialog._scrollView.vadjustment;
+			adjustment.value = adjustment.upper - adjustment.page_size;
+			await waitFor(() => dialog._scrollView.getItems().length > 8, 'scrolling did not load another page');
+			dialog._scrollView.selectItem(9);
+			assert(dialog._scrollView.getItems()[9].has_key_focus(), 'paged card could not receive keyboard focus');
+			dialog.close();
+			await Scripting.sleep(100);
+		}
+		extension.settings.set_enum('clipboard-orientation', Clutter.Orientation.VERTICAL);
+		extension.settings.set_int('item-height', 50);
+		extension.settings.set_int('clipboard-size', 850);
+		dialog.open();
+		await waitFor(
+			() => dialog._scrollView.getItems().length > 8,
+			'a wide viewport did not request enough cards to fill it',
+		);
+		dialog.close();
+		await Scripting.sleep(100);
+		extension.settings.set_int('item-height', 170);
+		extension.settings.set_int('clipboard-size', 500);
+		extension.settings.set_enum('clipboard-orientation', Clutter.Orientation.HORIZONTAL);
+		report.scenarios.push(
+			'bounded opening, viewport fill, scroll paging, keyboard focus, retained actor reordering',
+		);
 		for (const [type] of fixtures) {
 			dialog.search(query('', type));
 			dialog.open();
@@ -208,6 +273,12 @@ export async function run() {
 			);
 			const image = await snapshot(`card-${type}`);
 			if (type === ItemType.Text || type === ItemType.Code) assertRenderedContent(items[0], image);
+			if (type === ItemType.Text || type === ItemType.Code) {
+				extension.settings.set_boolean('show-header', false);
+				await Scripting.sleep(100);
+				assertRenderedContent(items[0], await snapshot(`card-${type}-masked`));
+				extension.settings.set_boolean('show-header', true);
+			}
 			dialog.close();
 			await Scripting.sleep(100);
 		}
@@ -294,6 +365,35 @@ export async function run() {
 			await Scripting.sleep(80);
 		}
 		report.scenarios.push('20 repeated open, page, close cycles');
+		const longText = 'LARGE TEXT FIXTURE\n' + 'long text line\n'.repeat(60000);
+		const longCode = 'const largeCodeFixture = true;\n' + 'console.log(largeCodeFixture);\n'.repeat(2500);
+		for (const [type, content] of [
+			[ItemType.Text, longText],
+			[ItemType.Code, longCode],
+		]) {
+			const entry = await extension.entryTracker.insert(
+				type,
+				content,
+				type === ItemType.Code ? { language: { id: 'javascript', name: 'JavaScript' } } : null,
+			);
+			dialog.addEntry(entry);
+			dialog.search(query(type === ItemType.Text ? 'LARGE TEXT FIXTURE' : 'largeCodeFixture'));
+			await Scripting.sleep(100);
+			dialog.open();
+			await Scripting.sleep(200);
+			const card = dialog._scrollView.getItems().find((actor) => actor.entry === entry);
+			assert(card, 'large clipboard entry failed to render');
+			const label = type === ItemType.Text ? card._text : card._code;
+			assert(label.text.length <= 4100, 'large card text was not bounded before native layout');
+			assert(entry.content === content, 'card preview changed the original clipboard content');
+			assert(
+				(type === ItemType.Text ? label.label : label.code) === content,
+				'preview lost the complete source text',
+			);
+			dialog.close();
+			await Scripting.sleep(100);
+		}
+		report.scenarios.push('large text and code previews retain complete clipboard data');
 		await Main.extensionManager._callExtensionDisableWithRebase(UUID);
 		await Scripting.sleep(200);
 		await Main.extensionManager._callExtensionEnable(UUID);

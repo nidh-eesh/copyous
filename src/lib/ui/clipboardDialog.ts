@@ -518,7 +518,6 @@ export class ClipboardDialog extends St.Widget {
 
 		this.opened = true;
 		global.compositor.disable_unredirect();
-		this.scheduleAfterOpen();
 
 		this._dialog.ease({
 			opacity: 255,
@@ -528,6 +527,11 @@ export class ClipboardDialog extends St.Widget {
 			scaleY: 1,
 			duration: ANIMATION_TIME,
 			mode,
+			onComplete: () => {
+				if (this._destroyed || !this.opened) return;
+				this._scrollView.setLoadMoreEnabled(true);
+				this.scheduleAfterOpen();
+			},
 		});
 	}
 
@@ -537,6 +541,7 @@ export class ClipboardDialog extends St.Widget {
 
 		this._closing = true;
 		this.opened = false;
+		this._scrollView.setLoadMoreEnabled(false);
 		this._updateCursor = true;
 		this._clipboardItemMenu.close();
 
@@ -843,6 +848,7 @@ export class ClipboardDialog extends St.Widget {
 
 		this._afterOpenIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
 			this._afterOpenIdleId = 0;
+			if (this._destroyed || !this.opened) return GLib.SOURCE_REMOVE;
 			this._openToIdleTiming?.finish({ phase: 'post-map' });
 			this._openToIdleTiming = undefined;
 			this.queuePreviews(this._scrollView.getItems());
@@ -1212,7 +1218,7 @@ export class ClipboardDialog extends St.Widget {
 		this.updateFitConstraint();
 
 		// Navigate to first item
-		if (!this._scrollView.navigate_focus(null, St.DirectionType.DOWN, false)) {
+		if (!this._scrollView.focusInitialItem()) {
 			this._header.updateHeader(true, false);
 			this._header.searchEntry.grab_key_focus();
 		}

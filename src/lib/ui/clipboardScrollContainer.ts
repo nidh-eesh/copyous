@@ -170,8 +170,8 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 		if (this._statusItem.get_parent() !== null) this.remove_child(this._statusItem);
 		for (let index = 0; index < items.length; index++) {
 			const item = items[index]!;
-			if (item.get_parent() === this) this.remove_child(item);
-			this.insert_child_at_index(item, index);
+			if (item.get_parent() !== this) this.insert_child_at_index(item, index);
+			else if (this.get_child_at_index(index) !== item) this.set_child_at_index(item, index);
 			this.connectItemSignals(item);
 		}
 
@@ -301,6 +301,16 @@ export class ClipboardScrollContainer extends St.BoxLayout {
 		}
 
 		return false;
+	}
+
+	public focusInitialItem(): boolean {
+		const child = get_first_visible_child(this);
+		if (!(child instanceof ClipboardItem)) return false;
+
+		this._lastFocus = child;
+		// Mapping already resets the scroll position; avoid forcing allocation to scroll to zero again.
+		child.grab_key_focus();
+		return true;
 	}
 
 	public selectNextItem() {

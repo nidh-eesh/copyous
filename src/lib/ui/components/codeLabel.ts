@@ -6,6 +6,7 @@ import St from 'gi://St';
 
 import type CopyousExtension from '../../../extension.js';
 import { registerClass } from '../../common/gjs.js';
+import { previewText } from '../../common/previewText.js';
 import { CustomColorScheme } from '../../common/settings.js';
 import { Language } from '../../database/database.js';
 import { normalizeIndentation, trim } from './label.js';
@@ -379,7 +380,7 @@ export class CodeLabel extends St.Label {
 		if (this._code == null) return;
 
 		// Trim indentation before highlighting to prevent empty lines
-		let text = normalizeIndentation(trim(this._code), this.tabWidth);
+		let text = normalizeIndentation(trim(previewText(this._code)), this.tabWidth);
 		if (this.syntaxHighlighting && this.ext.hljs != null) {
 			const language =
 				this.language && this.ext.hljs.getLanguage(this.language.id) != null ? this.language.id : null;

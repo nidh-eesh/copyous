@@ -2,6 +2,7 @@ import GObject from 'gi://GObject';
 import St from 'gi://St';
 
 import { registerClass } from '../../common/gjs.js';
+import { previewText } from '../../common/previewText.js';
 
 interface ConstructorProps {
 	tabWidth: number;
@@ -81,6 +82,6 @@ export class Label extends St.Label {
 	}
 
 	private updateLabel() {
-		this.text = normalizeIndentation(trim(this.label), this.tabWidth);
+		this.text = normalizeIndentation(trim(previewText(this.label)), this.tabWidth);
 	}
 }
