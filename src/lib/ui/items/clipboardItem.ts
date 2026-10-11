@@ -399,7 +399,7 @@ function createHoleEffectClass() {
 				return snippet;
 			}
 
-			vfunc_paint_target(): boolean {
+			vfunc_paint_target(node: Clutter.PaintNode, paintContext: Clutter.PaintContext): boolean {
 				const actor = (this as unknown as { actor: Clutter.Actor }).actor;
 				const shader = this as unknown as {
 					set_uniform_float(name: string, nComponents: number, values: number[]): void;
@@ -408,9 +408,13 @@ function createHoleEffectClass() {
 				shader.set_uniform_float('hole_box', 4, getHoleBox(this.target, actor));
 
 				const parent = Object.getPrototypeOf(HoleEffect51.prototype) as {
-					vfunc_paint_target: (this: HoleEffect51) => boolean;
+					vfunc_paint_target: (
+						this: HoleEffect51,
+						node: Clutter.PaintNode,
+						paintContext: Clutter.PaintContext,
+					) => boolean;
 				};
-				return parent.vfunc_paint_target.call(this);
+				return parent.vfunc_paint_target.call(this, node, paintContext);
 			}
 		}
 
